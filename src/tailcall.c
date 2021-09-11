@@ -14,7 +14,18 @@
     #endif
 #endif
 
-/* Some variables/types/etc */
+/* Some variables/types/etc. */
+
+typedef struct _tco_decl_returns_link {
+	zend_ast *parent_ast;
+	uint32_t return_child_index;
+    struct _tco_decl_returns_link *previous;
+} tco_decl_returns_link;
+
+typedef struct _tco_decl_context {
+	zend_ast_decl *declaration;
+    tco_decl_returns_link *returns_tail;
+} tco_decl_context;
 
 static void (*zend_ast_process_copy)(zend_ast*);
 
@@ -24,25 +35,124 @@ FILE *dbg;
  * ...
  *
  */
-void tco_patch_declaration(zend_ast_decl *declaration)
+void tco_cleanup()
 {
+
+}
+
+/*
+ * Allocate memory for a new declaration context, etc.
+ */
+tco_decl_context *tco_create_decl_context(zend_ast_decl *declaration)
+{
+    tco_decl_context *decl_context = malloc(sizeof(tco_decl_context));
+
+    decl_context->declaration = declaration;
+    decl_context->returns_tail = NULL;
+
+    return decl_context;
+}
+
+/*
+ * Allocate memory for a new node in the returns list.
+ */
+tco_decl_returns_link *tco_alloc_decl_returns_link()
+{
+    return malloc(sizeof(tco_decl_returns_link));
+}
+
+/*
+ * Frees all memory allocated for (and associated with) a given context.
+ * (This includes the return nodes btw.)
+ */
+void tco_free_decl_context(tco_decl_context *decl_context)
+{
+    // Free memory allocated for returns.
+
+    tco_decl_returns_link *current_return = decl_context->returns_tail;
+    tco_decl_returns_link *tmp;
+
+    while (current_return) {
+        fprintf(dbg, "(freeing current_return)\n");
+        fflush(dbg);
+
+        // Save the pointer before we free the memory it's stored in.
+
+        tmp = current_return->previous;
+
+        free(current_return);
+
+        // Update pointer to next (technically previous) return node.
+
+        current_return = tmp;
+    }
+
+    // Now free the context itself.
+
+    free(decl_context);
+}
+
+/*
+ * Adds a new return node/link in the given context.
+ */
+void tco_decl_context_add_return(
+    tco_decl_context *decl_context,
+    zend_ast *parent_ast
+) {
+    tco_decl_returns_link *new_returns_link = tco_alloc_decl_returns_link();
+
+    // Set return link node values.
+
+    new_returns_link->parent_ast = parent_ast;
+    new_returns_link->return_child_index = 0;
+
+    // Point new node to the current tail & update tail pointer.
+
+    new_returns_link->previous = decl_context->returns_tail;
+
+    decl_context->returns_tail = new_returns_link;
+}
+
+/*
+ * ...
+ */
+void tco_patch_declaration(tco_decl_context *decl_context)
+{
+    zend_ast_decl *declaration = decl_context->declaration;
+
     fprintf(dbg, "tco_patch_declaration: ");
     fwrite(ZSTR_VAL(declaration->name), ZSTR_LEN(declaration->name), 1, dbg);
     fprintf(dbg, "\n");
     fflush(dbg);
+
+    // Explore returns (if applicable)
+
+    tco_decl_returns_link *current_return = decl_context->returns_tail;
+
+    while (current_return) {
+        fprintf(dbg, "(return statement)\n");
+        fflush(dbg);
+
+        // Update pointer to next (technically previous) return node.
+
+        current_return = current_return->previous;
+    }
 }
 
 /*
  * The general idea here is:
  *
- * 1. Recursively explore all child nodes.
- * 2. Once child nodes have been explored...
- * 3. Check whether current node is a function/method declaration.
- * 4. If so, run it through tco_patch_function()
+ * - Recursively explore all child nodes.
+ * - If current node is a function/method declaration...
+ * - Collect return statements relevant to that scope/context.
+ * - Then run the declaration (and its respective returns) through tco_patch_declaration()
  *
  */
-void tco_walk_ast(zend_ast *ast)
-{
+void tco_walk_ast(
+    zend_ast *ast,
+    zend_ast *parent_ast,
+    tco_decl_context *decl_context
+) {
     // Part 1: Explore child nodes.
 
     uint32_t assumed_children = 0;
@@ -52,9 +162,28 @@ void tco_walk_ast(zend_ast *ast)
     // Get children/counts for declarations, lists and types w/ 1+ children.
 
     switch (ast->kind) {
+        case ZEND_AST_RETURN:
+            fprintf(dbg, "(ast->kind == ZEND_AST_RETURN)\n");
+            fflush(dbg);
+
+            // While we're here, we'll collect this return in the current context.
+
+            tco_decl_context_add_return(decl_context, parent_ast);
+
+            // Set values for exploring child nodes, etc.
+
+            assumed_children = 1;
+            child_nodes = ast->child;
+
+            break;
+
     	case ZEND_AST_FUNC_DECL:
     	case ZEND_AST_METHOD:
             declaration = (zend_ast_decl *) ast;
+
+            // Create a new declaration context for this... declaration.
+
+            decl_context = tco_create_decl_context(declaration);
 
             // Fall-through here is intentional.
 
@@ -66,6 +195,8 @@ void tco_walk_ast(zend_ast *ast)
             break;
 
         default:
+            // Generic code for lists/other.
+
             if (zend_ast_is_list(ast)) {
                 zend_ast_list *list = zend_ast_get_list(ast);
 
@@ -82,7 +213,7 @@ void tco_walk_ast(zend_ast *ast)
     if (assumed_children) {
         for (uint32_t i = 0; i < assumed_children; i++) {
             if (child_nodes[i]) {
-                tco_walk_ast(child_nodes[i]);
+                tco_walk_ast(child_nodes[i], ast, decl_context);
             }
         }
     }
@@ -90,28 +221,38 @@ void tco_walk_ast(zend_ast *ast)
     // Part 2: Extra magic for function/method declarations.
 
     if (declaration) {
-        tco_patch_declaration(declaration);
+        // Patch it.
+
+        tco_patch_declaration(decl_context);
+
+        // Free the current declaration context; we don't need it anymore.
+
+        tco_free_decl_context(decl_context);
     }
 }
 
-/* Custom AST handler */
+/*
+ * Custom AST handler.
+ */
 void tco_ast_process(zend_ast *ast)
 {
     dbg = fopen("G:/dev/tailcall/astlog.txt", "a");
 
+    // (Have a guess what this does.)
+
+    tco_walk_ast(ast, NULL, NULL);
+
     // ...
 
-    tco_walk_ast(ast);
+    tco_cleanup();
+
+    fclose(dbg);
 
     // If we hijacked another AST process, we'll call it here.
 
     if (zend_ast_process_copy) {
         zend_ast_process_copy(ast);
     }
-
-    // ...
-
-    fclose(dbg);
 }
 
 /* Main startup function for the extension */

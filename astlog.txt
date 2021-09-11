@@ -1,2 +1,0 @@
-tco_patch_declaration: b
-tco_patch_declaration: a
