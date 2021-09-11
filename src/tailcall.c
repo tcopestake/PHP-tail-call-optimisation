@@ -17,8 +17,8 @@
 /* Some variables/types/etc. */
 
 typedef struct _tco_decl_returns_link {
-	zend_ast *parent_ast;
-	uint32_t return_child_index;
+	zend_ast **siblings_and_self;
+	uint32_t self_index;
     struct _tco_decl_returns_link *previous;
 } tco_decl_returns_link;
 
@@ -97,14 +97,15 @@ void tco_free_decl_context(tco_decl_context *decl_context)
  */
 void tco_decl_context_add_return(
     tco_decl_context *decl_context,
-    zend_ast *parent_ast
+    zend_ast **siblings_and_self,
+    uint32_t self_index
 ) {
     tco_decl_returns_link *new_returns_link = tco_alloc_decl_returns_link();
 
     // Set return link node values.
 
-    new_returns_link->parent_ast = parent_ast;
-    new_returns_link->return_child_index = 0;
+    new_returns_link->siblings_and_self = siblings_and_self;
+    new_returns_link->self_index = self_index;
 
     // Point new node to the current tail & update tail pointer.
 
@@ -125,13 +126,21 @@ void tco_patch_declaration(tco_decl_context *decl_context)
     fprintf(dbg, "\n");
     fflush(dbg);
 
-    // Explore returns (if applicable)
+    // Explore returns (if applicable).
 
     tco_decl_returns_link *current_return = decl_context->returns_tail;
 
     while (current_return) {
         fprintf(dbg, "(return statement)\n");
         fflush(dbg);
+
+        fprintf(dbg, "Child index: %d\n", current_return->self_index);
+        fflush(dbg);
+
+        //zend_ast *return_node = current_return->parent_ast[current_return->return_child_index];
+
+        //fprintf(dbg, "Child index: %d\n", current_return->return_child_index);
+        //fflush(dbg);
 
         // Update pointer to next (technically previous) return node.
 
@@ -150,7 +159,8 @@ void tco_patch_declaration(tco_decl_context *decl_context)
  */
 void tco_walk_ast(
     zend_ast *ast,
-    zend_ast *parent_ast,
+    zend_ast **siblings_and_self,
+    uint32_t self_index,
     tco_decl_context *decl_context
 ) {
     // Part 1: Explore child nodes.
@@ -168,7 +178,7 @@ void tco_walk_ast(
 
             // While we're here, we'll collect this return in the current context.
 
-            tco_decl_context_add_return(decl_context, parent_ast);
+            tco_decl_context_add_return(decl_context, siblings_and_self, self_index);
 
             // Set values for exploring child nodes, etc.
 
@@ -189,7 +199,7 @@ void tco_walk_ast(
 
     	case ZEND_AST_CLOSURE:
     	case ZEND_AST_CLASS:
-            assumed_children = 4;
+            assumed_children = 4; // (Should we be calculating these values from the node/constant?)
             child_nodes = ((zend_ast_decl *) ast)->child;
 
             break;
@@ -213,7 +223,7 @@ void tco_walk_ast(
     if (assumed_children) {
         for (uint32_t i = 0; i < assumed_children; i++) {
             if (child_nodes[i]) {
-                tco_walk_ast(child_nodes[i], ast, decl_context);
+                tco_walk_ast(child_nodes[i], child_nodes, i, decl_context);
             }
         }
     }
@@ -240,7 +250,7 @@ void tco_ast_process(zend_ast *ast)
 
     // (Have a guess what this does.)
 
-    tco_walk_ast(ast, NULL, NULL);
+    tco_walk_ast(ast, NULL, 0, NULL);
 
     // ...
 
