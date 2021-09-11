@@ -24,19 +24,15 @@ FILE *dbg;
  * ...
  *
  */
-void tco_patch_function(zend_ast *ast)
+void tco_patch_declaration(zend_ast_decl *declaration)
 {
-    zend_ast_decl *declaration = (zend_ast_decl *) ast;
-
-    fprintf(dbg, "tco_patch_function: ");
+    fprintf(dbg, "tco_patch_declaration: ");
     fwrite(ZSTR_VAL(declaration->name), ZSTR_LEN(declaration->name), 1, dbg);
     fprintf(dbg, "\n");
     fflush(dbg);
 }
 
 /*
- * Custom AST handler
- *
  * The general idea here is:
  *
  * 1. Recursively explore all child nodes.
@@ -51,17 +47,31 @@ void tco_walk_ast(zend_ast *ast)
 
     uint32_t assumed_children = 0;
     zend_ast **child_nodes;
+    zend_ast_decl *declaration = NULL;
 
-    // Get children/counts for either lists or types w/ 1+ children.
+    // Get children/counts for declarations, lists and types w/ 1+ children.
 
-    if (zend_ast_is_list(ast)) {
-        zend_ast_list *list = zend_ast_get_list(ast);
+    switch (ast->kind) {
+    	case ZEND_AST_FUNC_DECL:
+    	case ZEND_AST_CLOSURE:
+    	case ZEND_AST_METHOD:
+    	case ZEND_AST_CLASS:
+            declaration = (zend_ast_decl *) ast;
+            assumed_children = 4;
+            child_nodes = declaration->child;
 
-        assumed_children = list->children;
-        child_nodes = list->child;
-    } else if (ast->kind >= (1 << ZEND_AST_NUM_CHILDREN_SHIFT)) {
-        assumed_children = zend_ast_get_num_children(ast);
-        child_nodes = ast->child;
+            break;
+
+        default:
+            if (zend_ast_is_list(ast)) {
+                zend_ast_list *list = zend_ast_get_list(ast);
+
+                assumed_children = list->children;
+                child_nodes = list->child;
+            } else if (ast->kind >= (1 << ZEND_AST_NUM_CHILDREN_SHIFT)) {
+                assumed_children = zend_ast_get_num_children(ast);
+                child_nodes = ast->child;
+            }
     }
 
     // Walk through any and all child nodes.
@@ -76,10 +86,8 @@ void tco_walk_ast(zend_ast *ast)
 
     // Part 2: Extra magic for function/method declarations.
 
-    switch (ast->kind) {
-        case ZEND_AST_METHOD:
-        case ZEND_AST_FUNC_DECL:
-            tco_patch_function(ast);
+    if (declaration) {
+        tco_patch_declaration(declaration);
     }
 }
 
