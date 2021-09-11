@@ -53,12 +53,15 @@ void tco_walk_ast(zend_ast *ast)
 
     switch (ast->kind) {
     	case ZEND_AST_FUNC_DECL:
-    	case ZEND_AST_CLOSURE:
     	case ZEND_AST_METHOD:
-    	case ZEND_AST_CLASS:
             declaration = (zend_ast_decl *) ast;
+
+            // Fall-through here is intentional.
+
+    	case ZEND_AST_CLOSURE:
+    	case ZEND_AST_CLASS:
             assumed_children = 4;
-            child_nodes = declaration->child;
+            child_nodes = ((zend_ast_decl *) ast)->child;
 
             break;
 
