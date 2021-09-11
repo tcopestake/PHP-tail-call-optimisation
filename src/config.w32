@@ -1,0 +1,3 @@
+ARG_ENABLE('tailcall', 'Tail call optimisation', 'no');
+
+EXTENSION('tailcall', 'tailcall.c', true);
