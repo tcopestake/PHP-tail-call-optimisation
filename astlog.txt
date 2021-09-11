@@ -1,2 +1,30 @@
-tco_ast_process called
-tco_ast_process called
+
+ tco_walk_ast: 
+(node: 132)
+(generic)
+(is a list)
+(child count: 2)
+
+ tco_walk_ast: 
+(node: 67)
+(ZEND_AST_FUNC_DECL)
+a
+ tco_walk_ast: 
+(node: 516)
+(generic)
+(has children)
+(child count: 2)
+
+ tco_walk_ast: 
+(node: 64)
+(generic)
+
+ tco_walk_ast: 
+(node: 128)
+(generic)
+(is a list)
+(child count: 1)
+
+ tco_walk_ast: 
+(node: 64)
+(generic)

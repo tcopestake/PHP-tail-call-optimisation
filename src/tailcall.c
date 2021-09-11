@@ -7,29 +7,119 @@
 
 /* Handle platform-specific hax */
 
-#ifdef _WIN32
-    #define ZEND_EXT_API __declspec(dllexport)
-#else
-    #define ZEND_EXT_API
+#ifndef ZEND_EXT_API
+    #ifdef _WIN32
+        #define ZEND_EXT_API __declspec(dllexport)
+    #else
+        #define ZEND_EXT_API
+    #endif
 #endif
 
 /* Some variables/types/etc */
 
 static void (*zend_ast_process_copy)(zend_ast*);
 
+FILE *dbg;
+
+/* Custom AST handler */
+void tco_walk_ast(zend_ast *ast)
+{
+    fflush(dbg);
+    fputs("\n tco_walk_ast: \n", dbg);
+    fprintf(dbg, "(node: %d)\n", ast->kind);
+    fflush(dbg);
+
+    switch (ast->kind) {
+        // case ZEND_AST_CALL:
+
+
+        /*case ZEND_AST_STMT_LIST:
+            fprintf(dbg, "(ZEND_AST_STMT_LIST)\n");
+            fflush(dbg);
+
+            zend_ast_list *list = zend_ast_get_list(ast);
+
+            for (int i = 0; i < list->children; i++) {
+                tco_walk_ast(list->child[i]);
+            }
+
+            break;*/
+
+        case ZEND_AST_FUNC_DECL:
+            // (It seems there's no inline function for casting to zend_ast_decl?)
+
+            zend_ast_decl *function = (zend_ast_decl *) ast;
+
+            fprintf(dbg, "(ZEND_AST_FUNC_DECL)\n");
+            fwrite(ZSTR_VAL(function->name), ZSTR_LEN(function->name), 1, dbg);
+            fflush(dbg);
+
+            break;
+
+        default:
+            // Generic handler for other types.
+
+            uint32_t assumed_children = 0;
+            zend_ast **child_nodes;
+
+            fprintf(dbg, "(generic)\n");
+            fflush(dbg);
+
+            if (zend_ast_is_list(ast)) {
+                fprintf(dbg, "(is a list)\n");
+                fflush(dbg);
+
+        		zend_ast_list *list = zend_ast_get_list(ast);
+
+                assumed_children = list->children;
+                child_nodes = list->child;
+            } else if (ast->kind >= (1 << ZEND_AST_NUM_CHILDREN_SHIFT)) {
+                fprintf(dbg, "(has children)\n");
+                fflush(dbg);
+
+                assumed_children = zend_ast_get_num_children(ast);
+                child_nodes = ast->child;
+            }
+
+            // Walk through any and all child nodes.
+
+            if (assumed_children) {
+                fprintf(dbg, "(child count: %d)\n", assumed_children);
+
+                for (uint32_t i = 0; i < assumed_children; i++) {
+                    if (child_nodes[i]) {
+                        tco_walk_ast(child_nodes[i]);
+                    }
+                }
+            }
+    }
+}
+
 /* Custom AST handler */
 void tco_ast_process(zend_ast *ast)
 {
-    FILE *fp = fopen("G:/dev/tailcall/astlog.txt", "a");
+    dbg = fopen("G:/dev/tailcall/astlog.txt", "a");
 
-    fputs("tco_ast_process called\n", fp);
+    // ...
 
-    fclose(fp);
+    tco_walk_ast(ast);
+
+    // If we hijacked another AST process, we'll call it here.
+
+    if (zend_ast_process_copy) {
+        zend_ast_process_copy(ast);
+    }
+
+    // ...
+
+    fclose(dbg);
 }
 
 /* Main startup function for the extension */
 static void tco_startup(void)
 {
+    // Save a copy of the original pointer & replace w/ tco_ast_process.
+
     zend_ast_process_copy = zend_ast_process;
 
     zend_ast_process = tco_ast_process;
