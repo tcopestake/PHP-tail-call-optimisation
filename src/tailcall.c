@@ -119,6 +119,26 @@ void tco_decl_context_add_return(
  */
 void tco_patch_declaration(tco_decl_context *decl_context)
 {
+	zval output;
+
+	ZVAL_STRING(&output, "(Test)");
+
+	zend_ast_zval *arg = emalloc(sizeof(zend_ast_zval));
+	arg->kind = ZEND_AST_ZVAL;
+	arg->attr = 0;
+    arg->val = output;
+
+    zend_ast *echo = zend_ast_create(ZEND_AST_ECHO, (zend_ast *)arg);
+
+
+
+
+
+
+
+
+
+
     zend_ast_decl *declaration = decl_context->declaration;
 
     fprintf(dbg, "tco_patch_declaration: ");
@@ -136,6 +156,8 @@ void tco_patch_declaration(tco_decl_context *decl_context)
 
         fprintf(dbg, "Child index: %d\n", current_return->self_index);
         fflush(dbg);
+
+        current_return->siblings_and_self[current_return->self_index] = echo;
 
         //zend_ast *return_node = current_return->parent_ast[current_return->return_child_index];
 
