@@ -1,6 +1,7 @@
 /* Includes and such */
 
 #include <stddef.h>
+#include <stdbool.h>
 #include "php.h"
 #include "zend_extensions.h"
 
@@ -19,6 +20,7 @@
 typedef struct _tco_decl_returns_link {
 	zend_ast **siblings_and_self;
 	uint32_t self_index;
+    zend_ast *self_node;
     struct _tco_decl_returns_link *previous;
 } tco_decl_returns_link;
 
@@ -106,6 +108,7 @@ void tco_decl_context_add_return(
 
     new_returns_link->siblings_and_self = siblings_and_self;
     new_returns_link->self_index = self_index;
+    new_returns_link->self_node = siblings_and_self[self_index];
 
     // Point new node to the current tail & update tail pointer.
 
@@ -119,6 +122,10 @@ void tco_decl_context_add_return(
  */
 void tco_patch_declaration(tco_decl_context *decl_context)
 {
+    zval declaration_name_zval;
+
+    // ...
+
 	zval output;
 
 	ZVAL_STRING(&output, "(Test)");
@@ -141,16 +148,41 @@ void tco_patch_declaration(tco_decl_context *decl_context)
 
     zend_ast_decl *declaration = decl_context->declaration;
 
-    fprintf(dbg, "tco_patch_declaration: ");
-    fwrite(ZSTR_VAL(declaration->name), ZSTR_LEN(declaration->name), 1, dbg);
-    fprintf(dbg, "\n");
-    fflush(dbg);
+    // We need the declaration name as a zval for the comparison functions (I think).
+
+    ZVAL_STR(&declaration_name_zval, declaration->name);
 
     // Explore returns (if applicable).
 
     tco_decl_returns_link *current_return = decl_context->returns_tail;
 
-    while (current_return) {
+    for (; current_return; current_return = current_return->previous) {
+        zend_ast *return_node = current_return->self_node;
+        zend_ast *return_value = return_node->child[0];
+
+        // As it stands, we're only interested in returns which call functions/methods.
+        // We also need to determine whether the function/other is calling itself.
+
+        switch (return_value->kind) {
+            case ZEND_AST_CALL:
+                if (
+                    string_case_compare_function(
+                        &declaration_name_zval,
+                        &((zend_ast_zval *) return_value->child[0])->val
+                    ) == 0
+                ) {
+                    // (Is recursive)
+                }
+
+                break;
+
+            case ZEND_AST_METHOD_CALL:
+            case ZEND_AST_STATIC_CALL:
+                break;
+        }
+
+        continue;
+
         fprintf(dbg, "(return statement)\n");
         fflush(dbg);
 
@@ -163,10 +195,6 @@ void tco_patch_declaration(tco_decl_context *decl_context)
 
         //fprintf(dbg, "Child index: %d\n", current_return->return_child_index);
         //fflush(dbg);
-
-        // Update pointer to next (technically previous) return node.
-
-        current_return = current_return->previous;
     }
 }
 
@@ -206,6 +234,13 @@ void tco_walk_ast(
 
             assumed_children = 1;
             child_nodes = ast->child;
+
+            // ...
+
+            fprintf(dbg, "Return child kind: %d (vs %d)\n", ast->child[0]->kind, ZEND_AST_CALL);
+            fflush(dbg);
+
+            // ...
 
             break;
 
@@ -268,7 +303,7 @@ void tco_walk_ast(
  */
 void tco_ast_process(zend_ast *ast)
 {
-    dbg = fopen("G:/dev/tailcall/astlog.txt", "a");
+    dbg = fopen("G:/dev/tailcall/astlog.txt", "w");
 
     // (Have a guess what this does.)
 
