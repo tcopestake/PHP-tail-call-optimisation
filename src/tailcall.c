@@ -176,7 +176,7 @@ void tco_patch()
         zend_ast *return_value = return_node->child[0];
 
         // As it stands, we're only interested in returns which call functions/methods.
-        // We also need to determine whether the function/other is calling itself.
+        // We also need to determine whether the callable is calling itself.
 
         switch (return_value->kind) {
             case ZEND_AST_CALL:
@@ -193,24 +193,59 @@ void tco_patch()
 
                 // If we're here, this is a recursive function call.
 
-
+                fprintf(dbg, "(Return is recursive)\n");
+                fflush(dbg);
 
                 break;
 
             case ZEND_AST_METHOD_CALL:
+                /*fprintf(dbg, "Method call: \n");
+
+                for (int i = 0; i < 4; i++) {
+                    if (return_value->child[i]) {
+                        fprintf(dbg, "%d: %d\n", i, return_value->child[i]->kind);
+                        fflush(dbg);
+                    }
+                }*/
+
+                break;
+
             case ZEND_AST_STATIC_CALL:
+                fprintf(dbg, "Static call: \n");
+
+                for (int i = 0; i < 3; i++) {
+                    if (return_value->child[i]) {
+                        fprintf(dbg, "%d: %d\n", i, return_value->child[i]->kind);
+
+                        if (return_value->child[i]->kind == 64) {
+                            zend_ast_zval *test = (zend_ast_zval *) return_value->child[i];
+
+                            fprintf(dbg, " - ");
+                            fwrite(Z_STRVAL(test->val), Z_STRLEN(test->val), 1, dbg);
+                            fprintf(dbg, "\n");
+                        }
+
+                        fflush(dbg);
+                    }
+                }
+
+                /*for (int i = 0; i < 4; i++) {
+                    if (return_value->child[0]) {
+                        zend_ast_zval *call = (zend_ast_zval *) return_value->child[0];
+
+                        fprintf(dbg, "Static call name: \n");
+                        fwrite(Z_STRVAL(call->val), Z_STRLEN(call->val), 1, dbg);
+                        fprintf(dbg, "\n");
+                        fflush(dbg);
+                    }
+                //}*/
+
                 break;
         }
 
         continue;
 
-        fprintf(dbg, "(return statement)\n");
-        fflush(dbg);
-
-        fprintf(dbg, "Child index: %d\n", current_return->self_index);
-        fflush(dbg);
-
-        current_return->siblings_and_self[current_return->self_index] = echo;
+        // current_return->siblings_and_self[current_return->self_index] = echo;
 
         //zend_ast *return_node = current_return->parent_ast[current_return->return_child_index];
 
@@ -362,8 +397,6 @@ void tco_walk_ast(
  */
 void tco_ast_process(zend_ast *ast)
 {
-    dbg = fopen("G:/dev/tailcall/astlog.txt", "w");
-
     // Init the global context.
 
     tco_global_context.class_decl = NULL;
@@ -386,14 +419,62 @@ void tco_ast_process(zend_ast *ast)
     }
 }
 
-/* Main startup function for the extension */
+/* Main startup function for the extension. */
 static void tco_startup(void)
 {
-    // Save a copy of the original pointer & replace w/ tco_ast_process.
+    dbg = fopen("G:/dev/tailcall/astlog.txt", "w");
+}
 
-    zend_ast_process_copy = zend_ast_process;
+/*
+ * The general idea here is:
+ *
+ * - Start from the end of the opcode array.
+ * - Whenever a return opcode is encountered, be on red alert.
+ * - If the next (technically previous) opcode is a function call...
+ * - Start gathering useful intel.
+ * -
+ */
+void tco_explore_op_array(zend_op_array *op_array)
+{
+    zend_op op;
+    uint32_t i = op_array->last;
 
-    zend_ast_process = tco_ast_process;
+    do {
+        --i;
+
+        op = op_array->opcodes[i];
+
+        fprintf(dbg, "op: %d: ", i);
+        fprintf(dbg, "%s\n", zend_get_opcode_name(op.opcode));
+        fflush(dbg);
+    } while (i);
+
+	fprintf(dbg, "(done)\n");
+}
+
+/* ... */
+static void tco_op_handler(zend_op_array *op_array)
+{
+    // If there's no function name, we ain't interested.
+
+	if (!op_array->function_name) {
+        return;
+    }
+
+	fprintf(dbg, "(Doing something)\n");
+    fflush(dbg);
+
+    tco_explore_op_array(op_array);
+
+    // ...
+
+	/*if (op_array->scope && op_array->scope->name) {
+        tco_explore_op_array(op_array);
+
+		fprintf(dbg, "%s::%s\n", op_array->scope->name->val, op_array->function_name->val);
+	} else {
+		fprintf(dbg, "%s\n", op_array->function_name->val);
+	}*/
 }
 
 /* Zend extension jazz */
@@ -409,7 +490,7 @@ ZEND_EXT_API zend_extension zend_extension_entry = {
     tco_startup,
     NULL,
     NULL,
-    NULL,
+    tco_op_handler,
     NULL,
     NULL,
     NULL,
