@@ -142,6 +142,66 @@ void tco_explore_blocks(tco_context *context)
     }
 }
 
+bool tco_is_call_recursive(zend_op_array *op_array, zend_op *op)
+{
+    // Make sure operand 2 is a constant.
+
+	if (op->op2_type != IS_CONST) {
+        return false;
+    }
+
+    // For methods, we also need to check that the class/"scope" matches.
+
+    switch (op->opcode) {
+        case ZEND_INIT_STATIC_METHOD_CALL:
+            // (We may not need to verify op_array->scope here, but I will just in caaase.)
+
+    		if (!op_array->scope || !op_array->scope->name) {
+                return false;
+            }
+
+            // If operand 1 is a constant/string, compare it to the current class/scope name.
+
+            if (op->op1_type == IS_CONST) {
+                if (
+                    !zend_string_equals(
+                        Z_STR_P(op_array->literals + op->op1.constant),
+                        op_array->scope->name
+                    )
+                ) {
+                    return false;
+                }
+            } else if (op->op1_type != IS_UNUSED) {
+                // I'm not 100% on this, but I think this will cover both self:: and static::
+                // If we're here, the call isn't recursive.
+
+                return false;
+            }
+
+            break;
+
+        case ZEND_INIT_METHOD_CALL:
+            // I'm pretty sure operand 1 being "unused" means $this, but I could be wrong.
+
+            if (op->op1_type != IS_UNUSED) {
+                // operand 1 isn't $this; can't be recursive.
+
+                return false;
+            }
+
+            break;
+    }
+
+    // If we got this far, the call either isn't a method call
+    // or the method call was within the same class/scope/whatever.
+    // In all cases, we now need to check the callable name.
+
+    return zend_string_equals(
+        Z_STR_P(op_array->literals + op->op2.constant),
+        op_array->function_name
+    );
+}
+
 /*
  * ...
  *
@@ -221,7 +281,21 @@ void tco_explore_op_array(zend_op_array *op_array, tco_context *context)
 
                 break;
 
+            case ZEND_INIT_METHOD_CALL:
+            case ZEND_INIT_STATIC_METHOD_CALL:
             case ZEND_INIT_FCALL:
+			case ZEND_INIT_FCALL_BY_NAME:
+			// case ZEND_INIT_NS_FCALL_BY_NAME:
+                // Determine whether this is a recursive call.
+
+                fprintf(dbg, "Function call in: %s\n", op_array->function_name->val);
+                fflush(dbg);
+
+                if (tco_is_call_recursive(op_array, op)) {
+                    fprintf(dbg, "(Call is recursive)\n");
+                    fflush(dbg);
+                }
+
                 if (search_state == TCO_STATE_FOUND_RETURN) {
                     init_index = i;
                 }
@@ -287,16 +361,6 @@ static void tco_op_handler(zend_op_array *op_array)
     tco_explore_blocks(context);
 
     tco_free_context(context);
-
-    // ...
-
-	/*if (op_array->scope && op_array->scope->name) {
-        tco_explore_op_array(op_array);
-
-		fprintf(dbg, "%s::%s\n", op_array->scope->name->val, op_array->function_name->val);
-	} else {
-		fprintf(dbg, "%s\n", op_array->function_name->val);
-	}*/
 }
 
 /* Zend extension jazz */
