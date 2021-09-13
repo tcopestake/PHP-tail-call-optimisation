@@ -425,6 +425,12 @@ static void tco_startup(void)
     dbg = fopen("G:/dev/tailcall/astlog.txt", "w");
 }
 
+enum {
+    TCO_STATE_SEARCHING = 1,
+    TCO_STATE_FOUND_RETURN,
+    TCO_STATE_FOUND_UCALL,
+};
+
 /*
  * The general idea here is:
  *
@@ -436,16 +442,58 @@ static void tco_startup(void)
  */
 void tco_explore_op_array(zend_op_array *op_array)
 {
-    zend_op op;
+    zend_op *op;
+    uint32_t return_index;
+    uint32_t ucall_index;
+    uint32_t init_index;
+    uint32_t search_state = TCO_STATE_SEARCHING;
+
     uint32_t i = op_array->last;
 
     do {
         --i;
 
-        op = op_array->opcodes[i];
+        op = &op_array->opcodes[i];
+
+        switch (op->opcode) {
+            case ZEND_RETURN:
+                search_state = TCO_STATE_FOUND_RETURN;
+                return_index = i;
+
+                break;
+
+            case ZEND_DO_UCALL:
+                if (search_state == TCO_STATE_FOUND_RETURN) {
+                    search_state = TCO_STATE_FOUND_UCALL;
+                    ucall_index = i;
+                }
+
+                break;
+
+            case ZEND_INIT_FCALL:
+                if (search_state == TCO_STATE_FOUND_RETURN) {
+                    init_index = i;
+
+                    // ...
+
+
+                }
+
+                break;
+
+            default:
+                /* The general idea here is: If anything other than
+                 * a ucall opcode followed the last return found,
+                 * it can't be a tail call - so we'll reset the search.
+                 */
+
+                if (search_state == TCO_STATE_FOUND_RETURN) {
+                    search_state = TCO_STATE_SEARCHING;
+                }
+        }
 
         fprintf(dbg, "op: %d: ", i);
-        fprintf(dbg, "%s\n", zend_get_opcode_name(op.opcode));
+        fprintf(dbg, "%s\n", zend_get_opcode_name(op->opcode));
         fflush(dbg);
     } while (i);
 
@@ -455,6 +503,8 @@ void tco_explore_op_array(zend_op_array *op_array)
 /* ... */
 static void tco_op_handler(zend_op_array *op_array)
 {
+    op_array->T = 120;
+
     // If there's no function name, we ain't interested.
 
 	if (!op_array->function_name) {
