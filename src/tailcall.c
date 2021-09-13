@@ -17,28 +17,125 @@
 
 /* Some variables/types/etc. */
 
-typedef struct _tco_callable_returns_link {
-	zend_ast **siblings_and_self;
-	uint32_t self_index;
-    zend_ast *self_node;
-    struct _tco_callable_returns_link *previous;
-} tco_callable_returns_link;
+FILE *dbg;
 
-typedef struct _tco_callable_context {
-	zend_ast_decl *callable_decl;
-    tco_callable_returns_link *returns_tail;
-} tco_callable_context;
+/*
+ * The general idea here is:
+ * - While searching the op array...
+ * - Irrelevant ops are saved in the current block.
+ * - When a return of interest is detected (i.e. a recursive tail call)...
+ * - A new block is created - where rewritten opcodes will be added.
+ * - At the end, a new op array of the required size will be allocated...
+ * - ... and all blocks will be iterated over and written to the new op array.
+ *
+ */
+
+#define OP_BLOCK_POOL_SIZE 8
+
+typedef struct _tco_op_block {
+    uint16_t number;
+    uint32_t op_array_start_index;
+    uint32_t op_array_end_index;
+    struct _tco_op_block *previous;
+} tco_op_block;
 
 typedef struct _tco_context {
-	zend_ast_decl *class_decl;
-	tco_callable_context *callable_context;
+    tco_op_block *op_block_pool;
+    uint16_t op_block_next_index;
+    tco_op_block *op_block_tail;
 } tco_context;
 
-tco_context tco_global_context;
+tco_context *tco_new_context()
+{
+    // Create the context.
 
-static void (*zend_ast_process_copy)(zend_ast*);
+    tco_context *context = malloc(sizeof(tco_context));
 
-FILE *dbg;
+    context->op_block_tail = NULL;
+    context->op_block_next_index = 0;
+
+    // Allocate enough memory for the op block pool.
+
+    context->op_block_pool = malloc(sizeof(tco_op_block) * OP_BLOCK_POOL_SIZE);
+
+    // (Have a guess what this does.)
+
+    return context;
+}
+
+tco_op_block *tco_new_op_block(tco_context *context)
+{
+    // If there's a free block in the pool, we'll use it.
+    // Otherwise, we'll have to allocate a new one.
+    // (In the future, maybe allocating a new pool would be better?)
+
+    tco_op_block *op_block;
+
+    if (context->op_block_next_index < OP_BLOCK_POOL_SIZE) {
+        op_block = context->op_block_pool + context->op_block_next_index;
+    } else {
+        op_block = malloc(sizeof(tco_op_block));
+    }
+
+    // This isn't necessarily the best way to handle this, but it'll work for now.
+
+    op_block->number = context->op_block_next_index++;
+
+    // Map tails, etc.
+
+    op_block->previous = context->op_block_tail;
+
+    context->op_block_tail = op_block;
+
+    // (Some additional processing will go here eventually)
+
+    // Return t'block.
+
+    return op_block;
+}
+
+void tco_free_context(tco_context *context)
+{
+    // Stage 1: Free any additional memory allocated for blocks outside of the pool.
+
+    while (
+        context->op_block_tail
+        && (context->op_block_tail->number >= OP_BLOCK_POOL_SIZE)
+    ) {
+        // Free the memory.
+
+        free(context->op_block_tail);
+
+        // Point to the next (technically previous) block.
+
+        context->op_block_tail = context->op_block_tail->previous;
+    }
+
+    // Stage 2: Free the memory allocated for the pool.
+
+    free(context->op_block_pool);
+
+    // Stage 3: Free the memory allocated for the context itself.
+
+    free(context);
+}
+
+void tco_explore_blocks(tco_context *context)
+{
+    tco_op_block *op_block = context->op_block_tail;
+
+    fprintf(dbg, "(Exploring blocks)\n");
+    fflush(dbg);
+
+    while (op_block) {
+        fprintf(dbg, "Block #%d\n", op_block->number);
+        fflush(dbg);
+
+        // Point to the next (technically previous) block.
+
+        op_block = op_block->previous;
+    }
+}
 
 /*
  * ...
@@ -47,376 +144,6 @@ FILE *dbg;
 void tco_cleanup()
 {
 
-}
-
-/*
- * Allocate memory for a new declaration context, etc.
- */
-tco_callable_context *tco_create_callable_context(zend_ast_decl *callable_decl)
-{
-    tco_callable_context *callable_context = malloc(sizeof(tco_callable_context));
-
-    callable_context->callable_decl = callable_decl;
-    callable_context->returns_tail = NULL;
-
-    return callable_context;
-}
-
-/*
- * Allocate memory for a new node in the returns list.
- */
-tco_callable_returns_link *tco_alloc_callable_returns_link()
-{
-    return malloc(sizeof(tco_callable_returns_link));
-}
-
-/*
- * Frees all memory allocated for (and associated with) a given context.
- * (This includes the return nodes btw.)
- */
-void tco_free_callable_context(tco_callable_context *callable_context)
-{
-    // Free memory allocated for returns.
-
-    tco_callable_returns_link *current_return = callable_context->returns_tail;
-    tco_callable_returns_link *tmp;
-
-    while (current_return) {
-        fprintf(dbg, "(freeing current_return)\n");
-        fflush(dbg);
-
-        // Save the previous pointer before we free the memory it's stored in.
-
-        tmp = current_return->previous;
-
-        free(current_return);
-
-        // Update pointer to previous (technically next) return node.
-
-        current_return = tmp;
-    }
-
-    // Now free the context itself.
-
-    free(callable_context);
-}
-
-/*
- * Adds a new return node/link in the given context.
- */
-void tco_callable_context_add_return(
-    tco_callable_context *callable_context,
-    zend_ast **siblings_and_self,
-    uint32_t self_index
-) {
-    tco_callable_returns_link *new_returns_link = tco_alloc_callable_returns_link();
-
-    // Set return link node values.
-
-    new_returns_link->siblings_and_self = siblings_and_self;
-    new_returns_link->self_index = self_index;
-    new_returns_link->self_node = siblings_and_self[self_index];
-
-    // Point new node to the current tail & update tail pointer.
-
-    new_returns_link->previous = callable_context->returns_tail;
-
-    callable_context->returns_tail = new_returns_link;
-}
-
-/*
- * ...
- */
-void tco_patch()
-{
-    zval callable_name_zval;
-
-    zend_ast_decl *class_decl = tco_global_context.class_decl;
-    tco_callable_context *callable_context = tco_global_context.callable_context;
-
-    if (class_decl) {
-        fprintf(dbg, "Class: ");
-        fwrite(ZSTR_VAL(class_decl->name), ZSTR_LEN(class_decl->name), 1, dbg);
-        fprintf(dbg, "\n");
-        fflush(dbg);
-    } else {
-        fprintf(dbg, "(No class context)\n");
-        fflush(dbg);
-    }
-
-    // ...
-
-	zval output;
-
-	ZVAL_STRING(&output, "(Test)");
-
-	zend_ast_zval *arg = emalloc(sizeof(zend_ast_zval));
-	arg->kind = ZEND_AST_ZVAL;
-	arg->attr = 0;
-    arg->val = output;
-
-    zend_ast *echo = zend_ast_create(ZEND_AST_ECHO, (zend_ast *)arg);
-
-    // ...
-
-
-
-
-
-    // We need the declaration name as a zval for the comparison functions (I think).
-
-    ZVAL_STR(&callable_name_zval, callable_context->callable_decl->name);
-
-    // Explore returns (if applicable).
-
-    tco_callable_returns_link *current_return = callable_context->returns_tail;
-
-    for (; current_return; current_return = current_return->previous) {
-        zend_ast *return_node = current_return->self_node;
-        zend_ast *return_value = return_node->child[0];
-
-        // As it stands, we're only interested in returns which call functions/methods.
-        // We also need to determine whether the callable is calling itself.
-
-        switch (return_value->kind) {
-            case ZEND_AST_CALL:
-                if (
-                    string_case_compare_function(
-                        &callable_name_zval,
-                        &((zend_ast_zval *) return_value->child[0])->val
-                    ) != 0
-                ) {
-                    // Not recursive; ignore it.
-
-                    continue;
-                }
-
-                // If we're here, this is a recursive function call.
-
-                fprintf(dbg, "(Return is recursive)\n");
-                fflush(dbg);
-
-                break;
-
-            case ZEND_AST_METHOD_CALL:
-                /*fprintf(dbg, "Method call: \n");
-
-                for (int i = 0; i < 4; i++) {
-                    if (return_value->child[i]) {
-                        fprintf(dbg, "%d: %d\n", i, return_value->child[i]->kind);
-                        fflush(dbg);
-                    }
-                }*/
-
-                break;
-
-            case ZEND_AST_STATIC_CALL:
-                fprintf(dbg, "Static call: \n");
-
-                for (int i = 0; i < 3; i++) {
-                    if (return_value->child[i]) {
-                        fprintf(dbg, "%d: %d\n", i, return_value->child[i]->kind);
-
-                        if (return_value->child[i]->kind == 64) {
-                            zend_ast_zval *test = (zend_ast_zval *) return_value->child[i];
-
-                            fprintf(dbg, " - ");
-                            fwrite(Z_STRVAL(test->val), Z_STRLEN(test->val), 1, dbg);
-                            fprintf(dbg, "\n");
-                        }
-
-                        fflush(dbg);
-                    }
-                }
-
-                /*for (int i = 0; i < 4; i++) {
-                    if (return_value->child[0]) {
-                        zend_ast_zval *call = (zend_ast_zval *) return_value->child[0];
-
-                        fprintf(dbg, "Static call name: \n");
-                        fwrite(Z_STRVAL(call->val), Z_STRLEN(call->val), 1, dbg);
-                        fprintf(dbg, "\n");
-                        fflush(dbg);
-                    }
-                //}*/
-
-                break;
-        }
-
-        continue;
-
-        // current_return->siblings_and_self[current_return->self_index] = echo;
-
-        //zend_ast *return_node = current_return->parent_ast[current_return->return_child_index];
-
-        //fprintf(dbg, "Child index: %d\n", current_return->return_child_index);
-        //fflush(dbg);
-    }
-}
-
-/*
- * The general idea here is:
- *
- * - Recursively explore all child nodes.
- * - If current node is a function/method declaration...
- * - Collect return statements relevant to that scope/context.
- * - Then run the declaration (and its respective returns) through tco_patch_declaration()
- *
- */
-void tco_walk_ast(
-    zend_ast *ast,
-    zend_ast **siblings_and_self,
-    uint32_t self_index
-) {
-    // This may get used if global contextual values are changed.
-    // (and subsequently need to be restored)
-
-    tco_context context_backup;
-    bool restore_class_decl = false;
-
-    // Part 1: Identify current node; set any values of interest;
-    // & configure values for exploring this node's children later.
-
-    zend_ast_decl *callable_decl = NULL;
-    uint32_t assumed_children = 0;
-    zend_ast **child_nodes;
-
-    switch (ast->kind) {
-        case ZEND_AST_CLASS:
-            // We're about to switch to a new class declaration - so we'll back up the current declaration.
-
-            context_backup.class_decl = tco_global_context.class_decl;
-
-            restore_class_decl = true;
-
-            // Switch to new class declaration.
-
-            tco_global_context.class_decl = (zend_ast_decl *) ast;
-
-            // Configure child node values, etc.
-
-            assumed_children = 4;
-            child_nodes = tco_global_context.class_decl->child;
-
-            break;
-
-        case ZEND_AST_RETURN:
-            fprintf(dbg, "(ast->kind == ZEND_AST_RETURN)\n");
-            fflush(dbg);
-
-            // While we're here, we'll collect this return in the current context.
-            // We're only interested in saving return values within a declaration.
-
-            if (tco_global_context.callable_context) {
-                tco_callable_context_add_return(
-                    tco_global_context.callable_context,
-                    siblings_and_self,
-                    self_index
-                );
-            } else {
-                fprintf(dbg, "(Skipping rando return)\n");
-                fflush(dbg);
-            }
-
-            // Set values for exploring child nodes, etc.
-
-            assumed_children = 1;
-            child_nodes = ast->child;
-
-            break;
-
-    	case ZEND_AST_FUNC_DECL:
-    	case ZEND_AST_METHOD:
-            // We're about to switch to a new callable context - so we'll back up the current context.
-
-            context_backup.callable_context = tco_global_context.callable_context;
-
-            // Create a new callable context for this... callable.
-
-            callable_decl = (zend_ast_decl *) ast;
-
-            tco_global_context.callable_context = tco_create_callable_context(callable_decl);
-
-            // Fall-through here is intentional.
-
-    	case ZEND_AST_CLOSURE:
-            assumed_children = 4; // (Should we be calculating these values from the node/constant?)
-            child_nodes = ((zend_ast_decl *) ast)->child;
-
-            break;
-
-        default:
-            // Generic code for lists/other.
-
-            if (zend_ast_is_list(ast)) {
-                zend_ast_list *list = zend_ast_get_list(ast);
-
-                assumed_children = list->children;
-                child_nodes = list->child;
-            } else if (ast->kind >= (1 << ZEND_AST_NUM_CHILDREN_SHIFT)) {
-                assumed_children = zend_ast_get_num_children(ast);
-                child_nodes = ast->child;
-            }
-    }
-
-    // Part 2: Explore any and all child nodes.
-
-    if (assumed_children) {
-        for (uint32_t i = 0; i < assumed_children; i++) {
-            if (child_nodes[i]) {
-                tco_walk_ast(child_nodes[i], child_nodes, i);
-            }
-        }
-    }
-
-    // Part 3: Extra magic if this current node is a function/method declaration.
-
-    if (callable_decl) {
-        // Patch it.
-
-        tco_patch();
-
-        // Free the current declaration context; we don't need it anymore.
-
-        tco_free_callable_context(tco_global_context.callable_context);
-
-        // Restore the original callable context.
-
-        tco_global_context.callable_context = context_backup.callable_context;
-    }
-
-    // If context was changed, restore it.
-
-    if (restore_class_decl) {
-        tco_global_context.class_decl = context_backup.class_decl;
-    }
-}
-
-/*
- * Custom AST handler.
- */
-void tco_ast_process(zend_ast *ast)
-{
-    // Init the global context.
-
-    tco_global_context.class_decl = NULL;
-    tco_global_context.callable_context = NULL;
-
-    // (Have a guess what this does.)
-
-    tco_walk_ast(ast, NULL, 0);
-
-    // ...
-
-    tco_cleanup();
-
-    fclose(dbg);
-
-    // If we hijacked another AST process, we'll call it here.
-
-    if (zend_ast_process_copy) {
-        zend_ast_process_copy(ast);
-    }
 }
 
 /* Main startup function for the extension. */
@@ -440,7 +167,7 @@ enum {
  * - Start gathering useful intel.
  * -
  */
-void tco_explore_op_array(zend_op_array *op_array)
+void tco_explore_op_array(zend_op_array *op_array, tco_context *context)
 {
     zend_op *op;
     uint32_t return_index;
@@ -514,7 +241,13 @@ static void tco_op_handler(zend_op_array *op_array)
 	fprintf(dbg, "(Doing something)\n");
     fflush(dbg);
 
-    tco_explore_op_array(op_array);
+    tco_context *context = tco_new_context();
+
+    tco_explore_op_array(op_array, context);
+
+    tco_explore_blocks(context);
+
+    tco_free_context(context);
 
     // ...
 
