@@ -87,6 +87,11 @@ tco_op_block *tco_new_op_block(tco_context *context)
 
     context->op_block_tail = op_block;
 
+    // Set initial indices... ?
+
+    op_block->op_array_start_index = 0;
+    op_block->op_array_end_index = 0;
+
     // (Some additional processing will go here eventually)
 
     // Return t'block.
@@ -128,7 +133,7 @@ void tco_explore_blocks(tco_context *context)
     fflush(dbg);
 
     while (op_block) {
-        fprintf(dbg, "Block #%d\n", op_block->number);
+        fprintf(dbg, "Block #%d (start: %d - end: %d)\n", op_block->number, op_block->op_array_start_index, op_block->op_array_end_index);
         fflush(dbg);
 
         // Point to the next (technically previous) block.
@@ -169,6 +174,7 @@ enum {
  */
 void tco_explore_op_array(zend_op_array *op_array, tco_context *context)
 {
+    tco_op_block *current_op_block;
     zend_op *op;
     uint32_t return_index;
     uint32_t ucall_index;
@@ -176,6 +182,24 @@ void tco_explore_op_array(zend_op_array *op_array, tco_context *context)
     uint32_t search_state = TCO_STATE_SEARCHING;
 
     uint32_t i = op_array->last;
+
+    // I think all op arrays are guaranteed to have at least one opcode, but just in case...
+
+    if (i < 1) {
+        // If there are no opcodes, there's nothing to do.
+
+        return;
+    }
+
+    // Create a starting op block.
+
+    current_op_block = tco_new_op_block(context);
+
+    // For now, assume that the starting block ends at the end of the op array.
+
+    current_op_block->op_array_end_index = i - 1;
+
+    // Now iterate over the op array.
 
     do {
         --i;
@@ -200,28 +224,45 @@ void tco_explore_op_array(zend_op_array *op_array, tco_context *context)
             case ZEND_INIT_FCALL:
                 if (search_state == TCO_STATE_FOUND_RETURN) {
                     init_index = i;
-
-                    // ...
-
-
                 }
 
                 break;
 
             default:
-                /* The general idea here is: If anything other than
-                 * a ucall opcode followed the last return found,
-                 * it can't be a tail call - so we'll reset the search.
-                 */
+                // God will never forgive me for this.
 
-                if (search_state == TCO_STATE_FOUND_RETURN) {
-                    search_state = TCO_STATE_SEARCHING;
+                switch (search_state) {
+                    case TCO_STATE_FOUND_UCALL:
+                        /*
+                         * If we're here, that means we've found a return followed by a ucall
+                         * i.e. this could potentially be a recursive call.
+                         * These opcodes will be handled later and should be ignored here.
+                         */
+
+                        break;
+
+                    case TCO_STATE_FOUND_RETURN:
+                        /*
+                         * If we're here, that means the previous opcode was a return, but
+                         * this current opcode is not a ucall i.e. this cannot (for our purposes)
+                         * be counted as a potential recursive call.
+                         * So we'll just reset the state & save the opcode to the current block.
+                         */
+
+                        search_state = TCO_STATE_SEARCHING;
+
+                        // (Fall-through here is intentional.)
+
+                    default:
+                        // For everything else, just save the opcode to the current block.
+
+                        current_op_block->op_array_start_index = i;
                 }
         }
 
-        fprintf(dbg, "op: %d: ", i);
+        /* fprintf(dbg, "op: %d: ", i);
         fprintf(dbg, "%s\n", zend_get_opcode_name(op->opcode));
-        fflush(dbg);
+        fflush(dbg); */
     } while (i);
 
 	fprintf(dbg, "(done)\n");
@@ -230,8 +271,6 @@ void tco_explore_op_array(zend_op_array *op_array, tco_context *context)
 /* ... */
 static void tco_op_handler(zend_op_array *op_array)
 {
-    op_array->T = 120;
-
     // If there's no function name, we ain't interested.
 
 	if (!op_array->function_name) {
