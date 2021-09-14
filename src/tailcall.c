@@ -218,9 +218,9 @@ static void tco_startup(void)
 }
 
 enum {
-    TCO_STATE_SEARCHING = 1,
-    TCO_STATE_FOUND_RETURN,
-    TCO_STATE_FOUND_UCALL,
+    TCO_STATE_SEEKING_RETURN = 1,
+    TCO_STATE_SEEKING_CALL,
+    TCO_STATE_SEEKING_INIT,
 };
 
 /*
@@ -239,7 +239,7 @@ void tco_explore_op_array(zend_op_array *op_array, tco_context *context)
     uint32_t return_index;
     uint32_t ucall_index;
     uint32_t init_index;
-    uint32_t search_state = TCO_STATE_SEARCHING;
+    uint32_t search_state = TCO_STATE_SEEKING_RETURN;
 
     uint32_t i = op_array->last;
 
@@ -256,8 +256,10 @@ void tco_explore_op_array(zend_op_array *op_array, tco_context *context)
     current_op_block = tco_new_op_block(context);
 
     // For now, assume that the starting block ends at the end of the op array.
+    // (We can also assume that the start is at the beginning.)
 
     current_op_block->op_array_end_index = i - 1;
+    current_op_block->op_array_start_index = 0;
 
     // Now iterate over the op array.
 
@@ -268,37 +270,71 @@ void tco_explore_op_array(zend_op_array *op_array, tco_context *context)
 
         switch (op->opcode) {
             case ZEND_RETURN:
-                search_state = TCO_STATE_FOUND_RETURN;
+                search_state = TCO_STATE_SEEKING_CALL;
                 return_index = i;
 
                 break;
 
             case ZEND_DO_UCALL:
-                if (search_state == TCO_STATE_FOUND_RETURN) {
-                    search_state = TCO_STATE_FOUND_UCALL;
-                    ucall_index = i;
+                if (search_state == TCO_STATE_SEEKING_CALL) {
+                    search_state = TCO_STATE_SEEKING_INIT;
                 }
 
                 break;
 
+         // case ZEND_INIT_NS_FCALL_BY_NAME:
             case ZEND_INIT_METHOD_CALL:
             case ZEND_INIT_STATIC_METHOD_CALL:
             case ZEND_INIT_FCALL:
 			case ZEND_INIT_FCALL_BY_NAME:
-			// case ZEND_INIT_NS_FCALL_BY_NAME:
                 // Determine whether this is a recursive call.
 
                 fprintf(dbg, "Function call in: %s\n", op_array->function_name->val);
                 fflush(dbg);
 
                 if (tco_is_call_recursive(op_array, op)) {
+                    /*
+                     * If we got this far, every opcode between here & return_index
+                     * needs to be placed in its own block.
+                     */
+
+                    /* If the end index of the current block is the same as return_index,
+                     * we can reuse the current block (as nothing else is in it).
+                     * Otherwise, we'll have to create a new one.
+                     */
+
+                    if (current_op_block->op_array_end_index != return_index) {
+                        // Set the start index of the current block to whatever comes after return_index.
+
+                        current_op_block->op_array_start_index = return_index + 1;
+
+                        // Create a new block for the recursive call.
+
+                        current_op_block = tco_new_op_block(context);
+                    }
+
+                    // Point the current block (whether it be new or old) to the recursive call opcodes.
+
+                    current_op_block->op_array_end_index = return_index;
+                    current_op_block->op_array_start_index = i;
+
+                    // Create a new block for whatever comes next.
+                    // (Which we also only need to do if we know there's still more opcodes to process.)
+
+                    if (i > 0) {
+                        current_op_block = tco_new_op_block(context);
+
+                        current_op_block->op_array_end_index = i - 1;
+                        current_op_block->op_array_start_index = 0;
+                    }
+
                     fprintf(dbg, "(Call is recursive)\n");
                     fflush(dbg);
                 }
 
-                if (search_state == TCO_STATE_FOUND_RETURN) {
-                    init_index = i;
-                }
+                // Either way, reset the search state.
+
+                search_state = TCO_STATE_SEEKING_RETURN;
 
                 break;
 
@@ -330,7 +366,7 @@ void tco_explore_op_array(zend_op_array *op_array, tco_context *context)
                     default:
                         // For everything else, just save the opcode to the current block.
 
-                        current_op_block->op_array_start_index = i;
+                        // current_op_block->op_array_start_index = i;
                 }
         }
 
