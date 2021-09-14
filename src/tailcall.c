@@ -202,21 +202,6 @@ bool tco_is_call_recursive(zend_op_array *op_array, zend_op *op)
     );
 }
 
-/*
- * ...
- *
- */
-void tco_cleanup()
-{
-
-}
-
-/* Main startup function for the extension. */
-static void tco_startup(void)
-{
-    dbg = fopen("G:/dev/tailcall/astlog.txt", "w");
-}
-
 enum {
     TCO_STATE_SEEKING_RETURN = 1,
     TCO_STATE_SEEKING_CALL,
@@ -337,37 +322,6 @@ void tco_explore_op_array(zend_op_array *op_array, tco_context *context)
                 search_state = TCO_STATE_SEEKING_RETURN;
 
                 break;
-
-            default:
-                // God will never forgive me for this.
-
-                switch (search_state) {
-                    case TCO_STATE_FOUND_UCALL:
-                        /*
-                         * If we're here, that means we've found a return followed by a ucall
-                         * i.e. this could potentially be a recursive call.
-                         * These opcodes will be handled later and should be ignored here.
-                         */
-
-                        break;
-
-                    case TCO_STATE_FOUND_RETURN:
-                        /*
-                         * If we're here, that means the previous opcode was a return, but
-                         * this current opcode is not a ucall i.e. this cannot (for our purposes)
-                         * be counted as a potential recursive call.
-                         * So we'll just reset the state & save the opcode to the current block.
-                         */
-
-                        search_state = TCO_STATE_SEARCHING;
-
-                        // (Fall-through here is intentional.)
-
-                    default:
-                        // For everything else, just save the opcode to the current block.
-
-                        // current_op_block->op_array_start_index = i;
-                }
         }
 
         /* fprintf(dbg, "op: %d: ", i);
@@ -387,7 +341,7 @@ static void tco_op_handler(zend_op_array *op_array)
         return;
     }
 
-	fprintf(dbg, "(Doing something)\n");
+    fprintf(dbg, "Processing: %s\n", op_array->function_name->val);
     fflush(dbg);
 
     tco_context *context = tco_new_context();
@@ -397,6 +351,19 @@ static void tco_op_handler(zend_op_array *op_array)
     tco_explore_blocks(context);
 
     tco_free_context(context);
+}
+
+/* 
+ */
+void tco_cleanup()
+{
+
+}
+
+/* Main startup function for the extension. */
+static void tco_startup(void)
+{
+    dbg = fopen("G:/dev/tailcall/astlog.txt", "w");
 }
 
 /* Zend extension jazz */
