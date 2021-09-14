@@ -28,6 +28,10 @@ FILE *dbg;
  * - At the end, a new op array of the required size will be allocated...
  * - ... and all blocks will be iterated over and written to the new op array.
  *
+ * The value of OP_BLOCK_POOL_SIZE should be set based on
+ * how many returns are expected in a given function.
+ * A pool of 8 will allow for ~4 returns before new blocks will start
+ * being allocated on-the-fly.
  */
 
 #define OP_BLOCK_POOL_SIZE 8
@@ -40,19 +44,27 @@ typedef struct _tco_op_block {
 } tco_op_block;
 
 typedef struct _tco_context {
+    bool do_optimise;
+    uint32_t required_size;
     tco_op_block *op_block_pool;
     uint16_t op_block_next_index;
     tco_op_block *op_block_tail;
 } tco_context;
 
-tco_context *tco_new_context()
+/* ... */
+tco_context *tco_new_context(zend_op_array *op_array)
 {
     // Create the context.
 
     tco_context *context = malloc(sizeof(tco_context));
 
+    context->do_optimise = false;
     context->op_block_tail = NULL;
     context->op_block_next_index = 0;
+
+    // Set the starting size (which is subject to change.)
+
+    context->required_size = op_array->last;
 
     // Allocate enough memory for the op block pool.
 
@@ -125,21 +137,56 @@ void tco_free_context(tco_context *context)
     free(context);
 }
 
-void tco_explore_blocks(tco_context *context)
+void tco_assemble_blocks(zend_op_array *op_array, tco_context *context)
 {
     tco_op_block *op_block = context->op_block_tail;
 
-    fprintf(dbg, "(Exploring blocks)\n");
-    fflush(dbg);
+    // Allocate new memoir for the reassembled opcodes.
+    // (The required total size should be stored in context->required_size.)
+
+	zend_op *new_ops = emalloc(sizeof(zend_op) * context->required_size);
+
+    // Iterate over each block, either copying their opcodes from the old array, to the new
+    // - or writing the new (modified) opcodes for recursive calls.
+
+    uint32_t destination_index = 0;
+    uint32_t source_length;
 
     while (op_block) {
         fprintf(dbg, "Block #%d (start: %d - end: %d)\n", op_block->number, op_block->op_array_start_index, op_block->op_array_end_index);
         fflush(dbg);
 
+        // Copy opcodes.
+
+        source_length = 1 + (op_block->op_array_end_index - op_block->op_array_start_index);
+
+        fprintf(dbg, "Length: %d\n", source_length);
+        fflush(dbg);
+
+		memcpy(
+            new_ops + destination_index,
+            op_array->opcodes + op_block->op_array_start_index,
+            sizeof(zend_op) * source_length
+        );
+
+        fprintf(dbg, "(Memory copied)\n");
+        fflush(dbg);
+
+        // Update the destination_index.
+
+        destination_index += source_length;
+
         // Point to the next (technically previous) block.
 
         op_block = op_block->previous;
     }
+
+    // Free the memory for the old ops; it's not needed anymore.
+    // & then point the op array to the new opcodes.
+
+	efree(op_array->opcodes);
+
+    op_array->opcodes = new_ops;
 }
 
 bool tco_is_call_recursive(zend_op_array *op_array, zend_op *op)
@@ -344,16 +391,16 @@ static void tco_op_handler(zend_op_array *op_array)
     fprintf(dbg, "Processing: %s\n", op_array->function_name->val);
     fflush(dbg);
 
-    tco_context *context = tco_new_context();
+    tco_context *context = tco_new_context(op_array);
 
     tco_explore_op_array(op_array, context);
 
-    tco_explore_blocks(context);
+    tco_assemble_blocks(op_array, context);
 
     tco_free_context(context);
 }
 
-/* 
+/*
  */
 void tco_cleanup()
 {
