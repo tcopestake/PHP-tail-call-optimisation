@@ -51,6 +51,12 @@ typedef struct _tco_context {
     tco_op_block *op_block_tail;
 } tco_context;
 
+enum {
+    TCO_STATE_SEEKING_RETURN,
+    TCO_STATE_SEEKING_CALL,
+    TCO_STATE_SEEKING_INIT,
+};
+
 /* ... */
 tco_context *tco_new_context(zend_op_array *op_array)
 {
@@ -146,8 +152,8 @@ void tco_assemble_blocks(zend_op_array *op_array, tco_context *context)
 
 	zend_op *new_ops = emalloc(sizeof(zend_op) * context->required_size);
 
-    // Iterate over each block, either copying their opcodes from the old array, to the new
-    // - or writing the new (modified) opcodes for recursive calls.
+    // Iterate over each block, either a) copying their opcodes from the old array, to the new
+    // or b) writing the new (modified) opcodes for recursive calls.
 
     uint32_t destination_index = 0;
     uint32_t source_length;
@@ -172,11 +178,11 @@ void tco_assemble_blocks(zend_op_array *op_array, tco_context *context)
         fprintf(dbg, "(Memory copied)\n");
         fflush(dbg);
 
-        // Update the destination_index.
+        // Update the destination_index (to point to where the next block of opcodes should be copied to).
 
         destination_index += source_length;
 
-        // Point to the next (technically previous) block.
+        // Point op_block to the next (technically previous) block.
 
         op_block = op_block->previous;
     }
@@ -189,6 +195,9 @@ void tco_assemble_blocks(zend_op_array *op_array, tco_context *context)
     op_array->opcodes = new_ops;
 }
 
+/*
+ *
+ */
 bool tco_is_call_recursive(zend_op_array *op_array, zend_op *op)
 {
     // Make sure operand 2 is a constant.
@@ -249,12 +258,6 @@ bool tco_is_call_recursive(zend_op_array *op_array, zend_op *op)
     );
 }
 
-enum {
-    TCO_STATE_SEEKING_RETURN = 1,
-    TCO_STATE_SEEKING_CALL,
-    TCO_STATE_SEEKING_INIT,
-};
-
 /*
  * The general idea here is:
  *
@@ -269,8 +272,6 @@ void tco_explore_op_array(zend_op_array *op_array, tco_context *context)
     tco_op_block *current_op_block;
     zend_op *op;
     uint32_t return_index;
-    uint32_t ucall_index;
-    uint32_t init_index;
     uint32_t search_state = TCO_STATE_SEEKING_RETURN;
 
     uint32_t i = op_array->last;
@@ -308,6 +309,8 @@ void tco_explore_op_array(zend_op_array *op_array, tco_context *context)
                 break;
 
             case ZEND_DO_UCALL:
+            case ZEND_DO_FCALL:
+            case ZEND_DO_FCALL_BY_NAME:
                 if (search_state == TCO_STATE_SEEKING_CALL) {
                     search_state = TCO_STATE_SEEKING_INIT;
                 }
@@ -369,11 +372,21 @@ void tco_explore_op_array(zend_op_array *op_array, tco_context *context)
                 search_state = TCO_STATE_SEEKING_RETURN;
 
                 break;
-        }
 
-        /* fprintf(dbg, "op: %d: ", i);
-        fprintf(dbg, "%s\n", zend_get_opcode_name(op->opcode));
-        fflush(dbg); */
+            default:
+                /*
+                 * If we're here, the current opcode is neither a return,
+                 * a call or an init.
+                 *
+                 * If the current search state is TCO_STATE_SEEKING_CALL, we need
+                 * to reset to TCO_STATE_SEEKING_RETURN (because this means we found
+                 * a return, but no immediate call i.e. this cannot be a tail call).
+                 */
+
+                if (search_state == TCO_STATE_SEEKING_CALL) {
+                    search_state = TCO_STATE_SEEKING_RETURN;
+                }
+        }
     } while (i);
 
 	fprintf(dbg, "(done)\n");
