@@ -36,10 +36,7 @@ FILE *dbg;
 
 #define OP_BLOCK_POOL_SIZE 8
 
-typedef struct _tco_t_remap {
-    uint32_t new_read_index;
-    uint32_t new_write_index;
-} tco_t_remap;
+typedef uint32_t tco_t_remap;
 
 typedef struct _tco_op_block {
     uint16_t number;
@@ -164,10 +161,6 @@ void tco_assemble_blocks(tco_context *context)
 
     tco_op_block *op_block = context->op_block_tail;
 
-    // A number of extra temporary variables will need to be created.
-
-    op_array->T += op_array->num_args;
-
     // Allocate new memoir for the reassembled opcodes.
     // (The required total size should be stored in context->required_size.)
 
@@ -283,19 +276,40 @@ bool tco_is_call_recursive(zend_op_array *op_array, zend_op *op)
 /* ... */
 tco_t_remap *tco_get_t_remaps(tco_context *context)
 {
+    // Each existing T variable will potentially need its own remap.
+
+    size_t bytes_required = sizeof(tco_t_remap) * context->op_array->T;
+
     // If remaps haven't already been allocated, we need to allocate 'em.
 
     if (!context->t_remaps) {
-        // We'll need a maximum of 1 remap per argument.
-        // We also need to intialise everything to zero.
+        context->t_remaps = (tco_t_remap *) malloc(bytes_required);
 
-        context->t_remaps = (tco_t_remap *) calloc(
-            context->op_array->num_args,
-            sizeof(tco_t_remap)
-        );
+        // While we're here, we should probably update T to reflect the new (expected) number.
+        // (This may make more sense done elsewhere, but it's here for now at least.)
+
+        context->op_array->T += context->op_array->T;
     }
 
+    // (We also need to intialise everything to zero.)
+
+    memset(context->t_remaps, 0x00, bytes_required);
+
     return context->t_remaps;
+}
+
+/* ... */
+inline void tco_check_operand_remaps(zend_uchar type, znode_op operand, tco_t_remap *t_remaps)
+{
+    if (type == IS_TMP_VAR) {
+        // If the given T var has been remapped, we need to remap this operand.
+
+        uint32_t remap_to = t_remaps[operand.var];
+
+        if (remap_to > 0) {
+            operand.var = remap_to;
+        }
+    }
 }
 
 /*
@@ -320,20 +334,12 @@ void tco_analyse_call(tco_op_block *op_block, tco_context *context)
 
     context->do_optimise = true;
 
-    // Next [...]
-
-    // We're going to need to add some temporary variables.
-    // (One for each argument.)
+    // T variable mapping.
     // (op_array->T itself will be updated elsewhere.)
 
-    uint32_t current_free_t_var = op_array->T;
-
-    fprintf(dbg, "Assign opcode: %d\n", ZEND_ASSIGN);
-    fflush(dbg);
-
-    // T variable mapping.
-
     tco_t_remap *t_remaps = tco_get_t_remaps(context);
+
+    uint32_t next_free_t_var = op_array->T;
 
     // I won't yet do any shenanigans to optimise this part;
     // I'll just assume all arguments need to be set.
@@ -357,16 +363,26 @@ void tco_analyse_call(tco_op_block *op_block, tco_context *context)
     ) {
         op = &op_array->opcodes[i];
 
+        fprintf(dbg, "&op_array->opcodes[i]: %d\n", op->opcode);
+        fflush(dbg);
+
         switch (op->opcode) {
             case ZEND_SEND_VAR:
             case ZEND_SEND_VAR_EX:
             case ZEND_SEND_VAL:
             case ZEND_SEND_VAL_EX:
+                // This opcode isn't needed - so we'll nop it out.
+                // This should get optimised out by later passes elsewhere anyway.
+                // (Alternatively, it would be possible to just shuffle the next opcode up, etc.)
+
+                op->opcode = ZEND_NOP;
+
                 // Any T variable used here needs to be protected.
-                // (It's going to be used later.)
+                // (It's going to be needed later.)
 
-
-
+                if (op->op1_type == IS_TMP_VAR) {
+                    t_remaps[op->op1.var] = next_free_t_var++;
+                }
 
                 // Increment the argument counter.
 
@@ -375,11 +391,22 @@ void tco_analyse_call(tco_op_block *op_block, tco_context *context)
                 break;
 
             default:
-                // For any other opcode, we need to ensure it's not returning
-                // its result to a "protected" T variable.
-                // If it is, we'll reroute it to a new T var.
+                /*
+                 * If this opcode is trying to read a T var (in either operand)
+                 * we need to ensure it's reading from the remapped T var (if applicable).
+                 *
+                 * If the opcode is trying to alter a protected T var, we need to remap it.
+                 *
+                 * We should be safe to assume that no opcode will be trying to access
+                 * the new T vars - given that they didn't exist until we just created them.
+                 */
 
+                tco_check_operand_remaps(op->op1_type, op->op1, t_remaps);
+                tco_check_operand_remaps(op->op2_type, op->op2, t_remaps);
 
+                tco_check_operand_remaps(op->result_type, op->result, t_remaps);
+
+                // ...
 
                 break;
         }
@@ -547,10 +574,18 @@ static void tco_op_handler(zend_op_array *op_array)
     tco_explore_op_array(context);
 
     if (context->do_optimise) {
+
+
         tco_assemble_blocks(context);
+
+        fprintf(dbg, "Assembled blocks\n");
+        fflush(dbg);
     }
 
     tco_free_context(context);
+
+    fprintf(dbg, "Freed stuff.\n");
+    fflush(dbg);
 }
 
 /*
