@@ -36,6 +36,11 @@ FILE *dbg;
 
 #define OP_BLOCK_POOL_SIZE 8
 
+typedef struct _tco_t_remap {
+    uint32_t new_read_index;
+    uint32_t new_write_index;
+} tco_t_remap;
+
 typedef struct _tco_op_block {
     uint16_t number;
     uint32_t op_array_start_index;
@@ -49,6 +54,8 @@ typedef struct _tco_context {
     tco_op_block *op_block_pool;
     uint16_t op_block_next_index;
     tco_op_block *op_block_tail;
+    zend_op_array *op_array;
+    tco_t_remap *t_remaps;
 } tco_context;
 
 enum {
@@ -64,9 +71,11 @@ tco_context *tco_new_context(zend_op_array *op_array)
 
     tco_context *context = malloc(sizeof(tco_context));
 
+    context->op_array = op_array;
     context->do_optimise = false;
     context->op_block_tail = NULL;
     context->op_block_next_index = 0;
+    context->t_remaps = NULL;
 
     // Set the starting size (which is subject to change.)
 
@@ -138,14 +147,26 @@ void tco_free_context(tco_context *context)
 
     free(context->op_block_pool);
 
-    // Stage 3: Free the memory allocated for the context itself.
+    // Stage 3: Free any memory allocated for T var remaps.
+
+    if (context->t_remaps) {
+        free(context->t_remaps);
+    }
+
+    // Lastly: Free the memory allocated for the context itself.
 
     free(context);
 }
 
-void tco_assemble_blocks(zend_op_array *op_array, tco_context *context)
+void tco_assemble_blocks(tco_context *context)
 {
+    zend_op_array *op_array = context->op_array;
+
     tco_op_block *op_block = context->op_block_tail;
+
+    // A number of extra temporary variables will need to be created.
+
+    op_array->T += op_array->num_args;
 
     // Allocate new memoir for the reassembled opcodes.
     // (The required total size should be stored in context->required_size.)
@@ -169,7 +190,7 @@ void tco_assemble_blocks(zend_op_array *op_array, tco_context *context)
         fprintf(dbg, "Length: %d\n", source_length);
         fflush(dbg);
 
-		memcpy(
+        memcpy(
             new_ops + destination_index,
             op_array->opcodes + op_block->op_array_start_index,
             sizeof(zend_op) * source_length
@@ -258,6 +279,115 @@ bool tco_is_call_recursive(zend_op_array *op_array, zend_op *op)
     );
 }
 
+
+/* ... */
+tco_t_remap *tco_get_t_remaps(tco_context *context)
+{
+    // If remaps haven't already been allocated, we need to allocate 'em.
+
+    if (!context->t_remaps) {
+        // We'll need a maximum of 1 remap per argument.
+        // We also need to intialise everything to zero.
+
+        context->t_remaps = (tco_t_remap *) calloc(
+            context->op_array->num_args,
+            sizeof(tco_t_remap)
+        );
+    }
+
+    return context->t_remaps;
+}
+
+/*
+ *
+ */
+void tco_analyse_call(tco_op_block *op_block, tco_context *context)
+{
+    zend_op *op;
+
+    zend_op_array *op_array = context->op_array;
+
+    // (We need to protect T vars which have been used)
+
+    /*
+     * What we essentially need to do here is determine:
+     * - Which values need to be reset.
+     * - How much additional space will need to be allocated for the new opcodes.
+     */
+
+    // First, mark for optimisation.
+    // (If we got this far, optimisation is going to happen.)
+
+    context->do_optimise = true;
+
+    // Next [...]
+
+    // We're going to need to add some temporary variables.
+    // (One for each argument.)
+    // (op_array->T itself will be updated elsewhere.)
+
+    uint32_t current_free_t_var = op_array->T;
+
+    fprintf(dbg, "Assign opcode: %d\n", ZEND_ASSIGN);
+    fflush(dbg);
+
+    // T variable mapping.
+
+    tco_t_remap *t_remaps = tco_get_t_remaps(context);
+
+    // I won't yet do any shenanigans to optimise this part;
+    // I'll just assume all arguments need to be set.
+    // (I also won't yet account for default arguments or named arguments.)
+
+    op_array->opcodes[op_block->op_array_start_index].opcode = ZEND_NOP;
+    op_array->opcodes[op_block->op_array_end_index].opcode = ZEND_NOP;
+    op_array->opcodes[op_block->op_array_end_index - 1].opcode = ZEND_NOP;
+
+    uint32_t arguments_passed = 0;
+    uint32_t destination_index = op_block->op_array_start_index;
+
+    // This loop will skip the init at the first index & the call and return at the end.
+
+    uint32_t end_index = (op_block->op_array_end_index - 2);
+
+    for (
+        uint32_t i = (op_block->op_array_start_index + 1);
+        i <= end_index;
+        i++
+    ) {
+        op = &op_array->opcodes[i];
+
+        switch (op->opcode) {
+            case ZEND_SEND_VAR:
+            case ZEND_SEND_VAR_EX:
+            case ZEND_SEND_VAL:
+            case ZEND_SEND_VAL_EX:
+                // Any T variable used here needs to be protected.
+                // (It's going to be used later.)
+
+
+
+
+                // Increment the argument counter.
+
+                ++arguments_passed;
+
+                break;
+
+            default:
+                // For any other opcode, we need to ensure it's not returning
+                // its result to a "protected" T variable.
+                // If it is, we'll reroute it to a new T var.
+
+
+
+                break;
+        }
+
+        ++destination_index;
+    }
+}
+
 /*
  * The general idea here is:
  *
@@ -267,11 +397,14 @@ bool tco_is_call_recursive(zend_op_array *op_array, zend_op *op)
  * - Start gathering useful intel.
  * -
  */
-void tco_explore_op_array(zend_op_array *op_array, tco_context *context)
+void tco_explore_op_array(tco_context *context)
 {
     tco_op_block *current_op_block;
     zend_op *op;
     uint32_t return_index;
+
+    zend_op_array *op_array = context->op_array;
+
     uint32_t search_state = TCO_STATE_SEEKING_RETURN;
 
     uint32_t i = op_array->last;
@@ -353,6 +486,11 @@ void tco_explore_op_array(zend_op_array *op_array, tco_context *context)
                     current_op_block->op_array_end_index = return_index;
                     current_op_block->op_array_start_index = i;
 
+                    // Here we need to run some analysis on the call - so we know in advance
+                    // what will need to be rewritten later (in tco_assemble_blocks).
+
+                    tco_analyse_call(current_op_block, context);
+
                     // Create a new block for whatever comes next.
                     // (Which we also only need to do if we know there's still more opcodes to process.)
 
@@ -406,9 +544,11 @@ static void tco_op_handler(zend_op_array *op_array)
 
     tco_context *context = tco_new_context(op_array);
 
-    tco_explore_op_array(op_array, context);
+    tco_explore_op_array(context);
 
-    tco_assemble_blocks(op_array, context);
+    if (context->do_optimise) {
+        tco_assemble_blocks(context);
+    }
 
     tco_free_context(context);
 }
