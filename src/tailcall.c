@@ -164,7 +164,7 @@ void tco_assemble_blocks(tco_context *context)
     // Allocate new memoir for the reassembled opcodes.
     // (The required total size should be stored in context->required_size.)
 
-	zend_op *new_ops = emalloc(sizeof(zend_op) * context->required_size);
+    zend_op *new_ops = emalloc(sizeof(zend_op) * context->required_size);
 
     // Iterate over each block, either a) copying their opcodes from the old array, to the new
     // or b) writing the new (modified) opcodes for recursive calls.
@@ -216,7 +216,7 @@ bool tco_is_call_recursive(zend_op_array *op_array, zend_op *op)
 {
     // Make sure operand 2 is a constant.
 
-	if (op->op2_type != IS_CONST) {
+    if (op->op2_type != IS_CONST) {
         return false;
     }
 
@@ -226,7 +226,7 @@ bool tco_is_call_recursive(zend_op_array *op_array, zend_op *op)
         case ZEND_INIT_STATIC_METHOD_CALL:
             // (We may not need to verify op_array->scope here, but I will just in caaase.)
 
-    		if (!op_array->scope || !op_array->scope->name) {
+            if (!op_array->scope || !op_array->scope->name) {
                 return false;
             }
 
@@ -481,7 +481,7 @@ void tco_explore_op_array(tco_context *context)
             case ZEND_INIT_METHOD_CALL:
             case ZEND_INIT_STATIC_METHOD_CALL:
             case ZEND_INIT_FCALL:
-			case ZEND_INIT_FCALL_BY_NAME:
+            case ZEND_INIT_FCALL_BY_NAME:
                 // Determine whether this is a recursive call.
 
                 fprintf(dbg, "Function call in: %s\n", op_array->function_name->val);
@@ -562,7 +562,7 @@ static void tco_op_handler(zend_op_array *op_array)
 {
     // If there's no function name, we ain't interested.
 
-	if (!op_array->function_name) {
+    if (!op_array->function_name) {
         return;
     }
 
@@ -574,8 +574,6 @@ static void tco_op_handler(zend_op_array *op_array)
     tco_explore_op_array(context);
 
     if (context->do_optimise) {
-
-
         tco_assemble_blocks(context);
 
         fprintf(dbg, "Assembled blocks\n");
