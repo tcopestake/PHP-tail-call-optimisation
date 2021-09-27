@@ -57,6 +57,8 @@ typedef struct _tco_context {
     zend_op_array *op_array;
     tco_t_remap *t_remaps;
     tco_arg_map *arg_maps;
+    uint32_t appendix_offset;
+    uint32_t start_address;
 } tco_context;
 
 enum {
@@ -78,6 +80,11 @@ tco_context *tco_new_context(zend_op_array *op_array)
     context->op_block_next_index = 0;
     context->t_remaps = NULL;
     context->arg_maps = NULL;
+    context->start_address = 0;
+
+    // Perhaps unsurprisingly, the appendix starts... at the end.
+
+    context->appendix_offset = op_array->last;
 
     // Set the starting size (which is subject to change.)
 
@@ -177,6 +184,29 @@ void tco_free_context(tco_context *context)
     free(context);
 }
 
+/* */
+inline void tco_nop_out(zend_op *op)
+{
+	op->opcode = ZEND_NOP;
+
+	SET_UNUSED(op->op1);
+	SET_UNUSED(op->op2);
+	SET_UNUSED(op->result);
+}
+
+/* */
+inline void tco_make_jmp(zend_op *op, uint32_t address)
+{
+	op->opcode = ZEND_JMP;
+	op->extended_value = 0;
+	op->op1.opline_num = address;
+
+	SET_UNUSED(op->op1);
+	SET_UNUSED(op->op2);
+	SET_UNUSED(op->result);
+}
+
+/* */
 void tco_assemble_blocks(tco_context *context)
 {
     zend_op *op;
@@ -188,39 +218,26 @@ void tco_assemble_blocks(tco_context *context)
     // Allocate new memoir for the reassembled opcodes.
     // (The required total size should be stored in context->required_opcode_count.)
 
+    fprintf(dbg, "%d [vs] %d\n", op_array->last, context->required_opcode_count);
+    fflush(dbg);
+
     zend_op *new_ops = emalloc(sizeof(zend_op) * context->required_opcode_count);
 
-    // Iterate over each block, either a) copying their opcodes from the old array, to the new
-    // or b) writing the new (modified) opcodes for recursive calls.
+    // Copy all current opcodes.
 
-    uint32_t destination_index = 0;
-    uint32_t source_length;
+    memcpy(
+        new_ops,
+        op_array->opcodes,
+        sizeof(zend_op) * op_array->last
+    );
+
+    // Iterate over each block, appending the new (modified) opcodes for recursive calls, etc.
+
+    uint32_t destination_index = op_array->last;
 
     while (op_block) {
-        fprintf(dbg, "Block #%d (start: %d - end: %d)\n", op_block->number, op_block->op_array_start_index, op_block->op_array_end_index);
+        fprintf(dbg, "next_pseudo_op: %d\n", op_block->next_pseudo_op);
         fflush(dbg);
-
-        // Copy any (surviving) "original" opcodes.
-
-        source_length = 1 + (op_block->op_array_end_index - op_block->op_array_start_index);
-
-        fprintf(dbg, "Length: %d\n", source_length);
-        fflush(dbg);
-
-        memcpy(
-            new_ops + destination_index,
-            op_array->opcodes + op_block->op_array_start_index,
-            sizeof(zend_op) * source_length
-        );
-
-        fprintf(dbg, "(Memory copied)\n");
-        fflush(dbg);
-
-        // Update the destination_index (to point to where the next block of opcodes should be copied to).
-
-        destination_index += source_length;
-
-        // Handle any further opcode modification.
 
         if (op_block->next_pseudo_op > 0) {
             // Here, we need to copy the argument/assignment opcodes...
@@ -237,17 +254,9 @@ void tco_assemble_blocks(tco_context *context)
 
             destination_index += op_block->next_pseudo_op + 1;
 
-            // Now we need to create the jump (for the "reiteration").
+            // Now we need to create the jump back to the beginning (for the "reiteration").
 
-            op = &new_ops[destination_index - 1];
-
-        	op->opcode = ZEND_JMP;
-        	op->extended_value = 0;
-        	op->op1.opline_num = 3;
-
-        	SET_UNUSED(op->op1);
-        	SET_UNUSED(op->op2);
-        	SET_UNUSED(op->result);
+            tco_make_jmp(&new_ops[destination_index - 1], context->start_address);
         }
 
         // Point op_block to the next (technically previous) block.
@@ -261,6 +270,10 @@ void tco_assemble_blocks(tco_context *context)
 	efree(op_array->opcodes);
 
     op_array->opcodes = new_ops;
+
+    // Update op_array->last to account for the new opcodes.
+
+    op_array->last = context->required_opcode_count;
 }
 
 /*
@@ -434,8 +447,8 @@ void tco_analyse_call(tco_op_block *op_block, tco_context *context)
      * - Make a start on rewriting the opcodes to set the appropriate arguments/variables.
      */
 
-     zend_op *op;
-     zend_op *new_op;
+    zend_op *op;
+    zend_op *new_op;
 
     zend_op_array *op_array = context->op_array;
 
@@ -502,55 +515,49 @@ void tco_analyse_call(tco_op_block *op_block, tco_context *context)
 
         switch (op->opcode) {
             case ZEND_CHECK_UNDEF_ARGS:
-                // This opcode isn't needed - so we'll decrease the size requirements & skip it.
+                // This opcode isn't needed.
 
-                --context->required_opcode_count;
+                tco_nop_out(op);
 
                 break;
 
             case ZEND_SEND_VAR_EX:
             case ZEND_SEND_VAL_EX:
-                // This is for passing values with/to/as named arguments.
-                // Operand 2 should contain the name of the argument in question.
-                // (We're only interested in constants here.)
+            case ZEND_SEND_VAR:
+            case ZEND_SEND_VAL:
+                // If I'm not wrong, operand 2 being a constant means it's a named argument.
+                // Otherwise, operand 2 is the argument #... possibly?
 
                 if (op->op2_type == IS_CONST) {
                     // In theory, this function should never fail to find a value.
+                    // (And we need to add 1 because some indices are 1-based elsewhere.)
 
-                    next_arg_index = tco_find_named_arg(
+                    next_arg_index = 1 + tco_find_named_arg(
                         Z_STR_P(CT_CONSTANT_EX(op_array, op->op2.constant)),
                         context
                     );
-
-                    fprintf(dbg, "next_arg_index: %d\n", next_arg_index);
-                    fflush(dbg);
                 } else {
-                    // (I've not decided how to handle this case yet.)
-
-                    break;
+                    next_arg_index = op->op2.num;
                 }
 
-                // (Fall-through is intentional.)
-
-            case ZEND_SEND_VAR:
-            case ZEND_SEND_VAL:
-                fprintf(dbg, "op_array->num_args - next_arg_index - 1: %d\n", op_array->num_args - next_arg_index - 1);
+                fprintf(dbg, "next_arg_index: %d\n", next_arg_index);
                 fflush(dbg);
 
                 // ...
+
                 // Here we'll exploit the RECV/RECV_INIT opcodes to get the appropriate CV values.
 
                 new_op = &op_block->pseudo_ops[op_block->next_pseudo_op++];
 
                 new_op->opcode = ZEND_ASSIGN;
 
-            	SET_UNUSED(new_op->result);
-
                 new_op->op1_type = IS_CV;
-                new_op->op1.var = op_array->opcodes[op_array->num_args - next_arg_index - 1].result.var;
+                new_op->op1.var = op_array->opcodes[next_arg_index - 1].result.var;
 
                 new_op->op2_type = IS_TMP_VAR;
                 new_op->op2.var = 1;
+
+            	SET_UNUSED(new_op->result);
 
                 // ...
 
@@ -580,15 +587,18 @@ void tco_analyse_call(tco_op_block *op_block, tco_context *context)
         }
     }
 
-    // Here we can modify the start/end indices to cut out all the obsolete opcodes.
+    // We'll need to allocate more memory for the new opcodes & a jump.
+    // (We'll assume that every arg needs to be set - so we'll use op_array->num_args for the count.)
 
-    ++op_block->op_array_start_index;
+    context->required_opcode_count += (op_array->num_args + 1);
 
-    op_block->op_array_end_index = destination_index;
+    // The final opcode here needs to be a jump to where the new code will eventually be.
 
-    // We also need to knock 2 off the "required opcode count" for the init & the call.
+    tco_make_jmp(&op_array->opcodes[destination_index], context->appendix_offset);
 
-    context->required_opcode_count -= 2;
+    // Update the "appendix offset" ready for the next block (if any).
+
+    context->appendix_offset += op_array->num_args;
 }
 
 /*
@@ -717,9 +727,17 @@ void tco_explore_op_array(tco_context *context)
 
                 break;
 
-            case ZEND_JMP:
-                fprintf(dbg, "ZEND_JMP: %d / %d)\n", op->op1_type, op->op1_type);
+            case ZEND_RECV_INIT:
+            case ZEND_RECV:
+                // As we're searching backwards, the first occurrence of
+                // any of these opcodes is our cue to leave.
+
+                context->start_address = i + 1;
+
+                fprintf(dbg, "start_address: %d)\n", context->start_address);
                 fflush(dbg);
+
+                goto __done;
 
             default:
                 /*
@@ -736,6 +754,8 @@ void tco_explore_op_array(tco_context *context)
                 }
         }
     } while (i);
+
+    __done:
 
 	fprintf(dbg, "(done)\n");
 }
