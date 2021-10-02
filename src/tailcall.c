@@ -37,7 +37,6 @@ FILE *dbg;
 #define OP_BLOCK_POOL_SIZE 8
 
 typedef uint32_t tco_t_remap;
-typedef uint32_t tco_arg_map;
 
 typedef struct _tco_op_block {
     uint16_t number;
@@ -56,7 +55,6 @@ typedef struct _tco_context {
     tco_op_block *op_block_tail;
     zend_op_array *op_array;
     tco_t_remap *t_remaps;
-    tco_arg_map *arg_maps;
     uint32_t appendix_offset;
     uint32_t start_address;
 } tco_context;
@@ -79,7 +77,6 @@ tco_context *tco_new_context(zend_op_array *op_array)
     context->op_block_tail = NULL;
     context->op_block_next_index = 0;
     context->t_remaps = NULL;
-    context->arg_maps = NULL;
     context->start_address = 0;
 
     // Perhaps unsurprisingly, the appendix starts... at the end.
@@ -140,7 +137,7 @@ tco_op_block *tco_new_op_block(tco_context *context)
 
 void tco_free_context(tco_context *context)
 {
-    // Stage 1: Free any additional memory allocated for blocks outside of the pool.
+    // Free any additional memory allocated for blocks outside of the pool.
 
     while (
         context->op_block_tail
@@ -161,20 +158,14 @@ void tco_free_context(tco_context *context)
         context->op_block_tail = context->op_block_tail->previous;
     }
 
-    // Stage 2: Free the memory allocated for the pool.
+    // Free the memory allocated for the pool.
 
     free(context->op_block_pool);
 
-    // Stage 3: Free any memory allocated for T var remaps.
+    // Free any memory allocated for T var remaps.
 
     if (context->t_remaps) {
         free(context->t_remaps);
-    }
-
-    // Stage 4: Free any memory allocated for arg mapping.
-
-    if (context->arg_maps) {
-        free(context->arg_maps);
     }
 
     // (We need to free any Zend strings/vars here somewhere eventually.)
@@ -222,6 +213,8 @@ void tco_assemble_blocks(tco_context *context)
     fflush(dbg);
 
     zend_op *new_ops = emalloc(sizeof(zend_op) * context->required_opcode_count);
+
+    memset(new_ops, 0x00, sizeof(zend_op) * context->required_opcode_count);
 
     // Copy all current opcodes.
 
@@ -341,23 +334,13 @@ bool tco_is_call_recursive(zend_op_array *op_array, zend_op *op)
 
 /* ... */
 void tco_prep_optimisation(tco_context *context, tco_op_block *op_block) {
-    size_t bytes_required = sizeof(tco_arg_map) * context->op_array->num_args;
-
     // If this context hasn't already been prepped, prep it.
 
     if (!context->do_optimise) {
         // Flag for optimisation.
 
         context->do_optimise = true;
-
-        // Allocate memory for arg mapping.
-
-        context->arg_maps = (tco_arg_map *) malloc(bytes_required);
     }
-
-    // Either way, the argument mapping needs to be (re)set to 0.
-
-    memset(context->arg_maps, 0x00, bytes_required);
 
     // Allocate new space where rewritten argument "assignments" will be (temporarily) stored.
 
@@ -419,21 +402,8 @@ uint32_t tco_find_named_arg(zend_string *arg_name, tco_context *context)
     return 0;
 }
 
-/*
-uint32_t tco_find_variable_index(zend_string *name, tco_context *context)
-{
-    zend_op_array *op_array = context->op_array;
-
-    for (uint32_t i = 0; i < op_array->last_var; i++) {
-        if (zend_string_equals(op_array->vars[i], name)) {
-            return i;
-        }
-    }
-
-    // In theory, we should never be able to get this far.
-
-    return 0;
-}*/
+/* */
+#define TCO_GET_ARG_OPCODE(op_array, arg_index) op_array->opcodes[arg_index]
 
 /*
  *
@@ -457,9 +427,10 @@ void tco_analyse_call(tco_op_block *op_block, tco_context *context)
 
     tco_prep_optimisation(context, op_block);
 
-    // Argument mapping... ?
+    // This array will be used to flag which arg indices have been explicitly set.
+    // (And by extension: which arguments remain to be set afterwards.)
 
-    tco_arg_map *arg_maps = context->arg_maps;
+    bool *args_set = calloc(op_array->num_args, sizeof(args_set));
 
     // T variable mapping.
     // (op_array->T itself will be updated elsewhere.)
@@ -530,20 +501,23 @@ void tco_analyse_call(tco_op_block *op_block, tco_context *context)
 
                 if (op->op2_type == IS_CONST) {
                     // In theory, this function should never fail to find a value.
-                    // (And we need to add 1 because some indices are 1-based elsewhere.)
 
-                    next_arg_index = 1 + tco_find_named_arg(
+                    next_arg_index = tco_find_named_arg(
                         Z_STR_P(CT_CONSTANT_EX(op_array, op->op2.constant)),
                         context
                     );
                 } else {
-                    next_arg_index = op->op2.num;
+                    // (The indices in the operand are 1-based - so we'll have to subtract 1.)
+
+                    next_arg_index = op->op2.num - 1;
                 }
 
                 fprintf(dbg, "next_arg_index: %d\n", next_arg_index);
                 fflush(dbg);
 
-                // ...
+                // Flag this argument as having been set explicitly.
+
+                args_set[next_arg_index] = true;
 
                 // Here we'll exploit the RECV/RECV_INIT opcodes to get the appropriate CV values.
 
@@ -552,10 +526,10 @@ void tco_analyse_call(tco_op_block *op_block, tco_context *context)
                 new_op->opcode = ZEND_ASSIGN;
 
                 new_op->op1_type = IS_CV;
-                new_op->op1.var = op_array->opcodes[next_arg_index - 1].result.var;
+                new_op->op1.var = TCO_GET_ARG_OPCODE(op_array, next_arg_index).result.var;
 
                 new_op->op2_type = IS_TMP_VAR;
-                new_op->op2.var = 1;
+                new_op->op2.var = op->op1.var;
 
             	SET_UNUSED(new_op->result);
 
@@ -575,6 +549,10 @@ void tco_analyse_call(tco_op_block *op_block, tco_context *context)
 
                 ++next_arg_index;
 
+                // Nop out this opcode also.
+
+                tco_nop_out(op);
+
                 break;
 
             default:
@@ -586,6 +564,31 @@ void tco_analyse_call(tco_op_block *op_block, tco_context *context)
                 break;
         }
     }
+
+    // Now we'll iterate over every argument - and if it wasn't already set,
+    // we'll set it to its default value.
+
+    for (uint32_t i = 0; i < op_array->num_args; i++) {
+        if (!args_set[i]) {
+            op = &TCO_GET_ARG_OPCODE(op_array, i);
+
+            new_op = &op_block->pseudo_ops[op_block->next_pseudo_op++];
+
+            new_op->opcode = ZEND_ASSIGN;
+
+            new_op->op1_type = IS_CV;
+            new_op->op1.var = op->result.var;
+
+            new_op->op2_type = IS_CONST;
+            new_op->op2.constant = op->op2.constant;
+        }
+    }
+
+    // This isn't strictly necessary, but we'll nop out the unused opcodes.
+    // (They're more likely to get optimised out later if they're nopped.)
+
+    tco_nop_out(&op_array->opcodes[op_block->op_array_end_index]);
+    tco_nop_out(&op_array->opcodes[op_block->op_array_end_index - 1]);
 
     // We'll need to allocate more memory for the new opcodes & a jump.
     // (We'll assume that every arg needs to be set - so we'll use op_array->num_args for the count.)
@@ -599,6 +602,10 @@ void tco_analyse_call(tco_op_block *op_block, tco_context *context)
     // Update the "appendix offset" ready for the next block (if any).
 
     context->appendix_offset += op_array->num_args;
+
+    // Free allocated memory, etc.
+
+    free(args_set);
 }
 
 /*
