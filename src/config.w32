@@ -1,3 +1,5 @@
-ARG_ENABLE('tailcall', 'Tail call optimisation', 'no');
+ARG_ENABLE('tailcall', 'enable recursive tail call optimisation', 'no');
 
-EXTENSION('tailcall', 'tailcall.c', true);
+if (PHP_TAILCALL != "no") {
+    ZEND_EXTENSION('tailcall', 'tailcall.c', true);
+}

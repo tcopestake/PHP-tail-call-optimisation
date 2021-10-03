@@ -6,8 +6,8 @@ Disclaimer: I can't guarantee the completeness or stability of this extension - 
 
 ### Table of contents
 * [Example](#example)
-* [Installation]
-* [Configuration]
+* [Installation](#install)
+* [Configuration](#config)
 * [Under the hood](#internals)
 * [Caveats]
 * [License](#license)
@@ -117,11 +117,16 @@ This example demonstrates a number of things:
 2. At ```0006``` we can see that ```$x``` is reset to its default value of ```10```.
 3. Between ```0011``` and ```0014```, the call to another ```test``` function in a different scope, is correctly identified as not being recursive.
 
-<a name="installation"></a>
+<a name="install"></a>
 ### Installation
 
+As it stands, you'll need to compile the module yourself. There are ways to compile it in isolation, but it's probably much easier to use the PHP build tools.
 
-<a name="configuration"></a>
+First,
+
+
+
+<a name="config"></a>
 ### Configuration
 
 [todo]
