@@ -117,8 +117,10 @@ void tco_free_context(tco_context *context)
 {
     // Free any additional memory allocated for call info outside of the pool.
 
+    tco_call_info *next_info;
     tco_call_info *call_info;
-    tco_call_info *next_info = context->call_info_tail;
+
+    next_info = context->call_info_tail;
 
     while (next_info) {
         call_info = next_info;
@@ -129,18 +131,18 @@ void tco_free_context(tco_context *context)
             efree(call_info->pseudo_ops);
         }
 
-        // Point to the next (technically previous) structure.
+        // Save pointer to the next (technically previous) structure.
 
         next_info = call_info->previous;
 
         // If this structure was dynamically allocated, free it.
 
-        if (call_info->number < TCO_CALL_POOL_SIZE) {
+        if (call_info->number > TCO_CALL_POOL_SIZE) {
             free(call_info);
         }
     }
 
-    // Free the memory allocated for the pool.
+    // Free the memory allocated for the pool itself.
     // (By now, call_info should be pointing to it.)
 
     free(call_info);
