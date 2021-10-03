@@ -84,46 +84,66 @@ bool tco_is_call_recursive(zend_op_array *op_array, zend_op *op)
         return false;
     }
 
-    // For methods, we also need to check that the class/"scope" matches.
+    /*
+     * For functions w/ a scope, only method calls can be recursive.
+     * Conversely, method calls cannot be recursive for functions without scope.
+     */
 
-    switch (op->opcode) {
-        case ZEND_INIT_STATIC_METHOD_CALL:
-            // (We may not need to verify op_array->scope here, but I will just in caaase.)
+    if (op_array->scope) {
+        // For method calls, we also need to compare the class/"scope" name.
 
-            if (!op_array->scope || !op_array->scope->name) {
-                return false;
-            }
+        switch (op->opcode) {
+            case ZEND_INIT_STATIC_METHOD_CALL:
+                // If operand 1 is a constant/string, compare it to the current class/scope name.
 
-            // If operand 1 is a constant/string, compare it to the current class/scope name.
+                if (op->op1_type == IS_CONST) {
+                    if (
+                        !zend_string_equals(
+                            Z_STR_P(CT_CONSTANT_EX(op_array, op->op1.constant)),
+                            op_array->scope->name
+                        )
+                    ) {
+                        return false;
+                    }
+                } else if (op->op1_type != IS_UNUSED) {
+                    // I'm not 100% on this, but I think this will cover both self:: and static::
+                    // If we're here, the call isn't recursive.
 
-            if (op->op1_type == IS_CONST) {
-                if (
-                    !zend_string_equals(
-                        Z_STR_P(CT_CONSTANT_EX(op_array, op->op1.constant)),
-                        op_array->scope->name
-                    )
-                ) {
                     return false;
                 }
-            } else if (op->op1_type != IS_UNUSED) {
-                // I'm not 100% on this, but I think this will cover both self:: and static::
-                // If we're here, the call isn't recursive.
+
+                break;
+
+            case ZEND_INIT_METHOD_CALL:
+                // I'm pretty sure operand 1 being "unused" means $this, but I could be wrong.
+
+                if (op->op1_type != IS_UNUSED) {
+                    // operand 1 isn't $this; can't be recursive.
+
+                    return false;
+                }
+
+                break;
+
+            default:
+                // No other call type here could possibly be recursive.
 
                 return false;
-            }
+        }
+    } else {
+        // This just ensures the call is a "non-scoped" function call.
 
-            break;
+        switch (op->opcode) {
+            //case ZEND_INIT_NS_FCALL_BY_NAME
+            case ZEND_INIT_FCALL:
+            case ZEND_INIT_FCALL_BY_NAME:
+                break;
 
-        case ZEND_INIT_METHOD_CALL:
-            // I'm pretty sure operand 1 being "unused" means $this, but I could be wrong.
-
-            if (op->op1_type != IS_UNUSED) {
-                // operand 1 isn't $this; can't be recursive.
+            default:
+                // No other call type here could possibly be recursive.
 
                 return false;
-            }
-
-            break;
+        }
     }
 
     /*
@@ -390,7 +410,7 @@ void tco_optimise_recursive_call(
     for (; destination_index <= end_index; destination_index++) {
         tco_nop_out(&op_array->opcodes[destination_index]);
     }
-    
+
     // Free any allocated memory, etc.
 
     free(arg_mapping);
