@@ -11,7 +11,7 @@
 #include "tailcall.h"
 
 /*
- * Creates a new optomisation context.
+ * Creates a new optimisation context.
  *
  * (In practice, the context is just a container for all relevant data.)
  */

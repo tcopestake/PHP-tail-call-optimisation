@@ -143,7 +143,7 @@ phpize
 make
 ```
 
-If you have any problems, it's possible you don't have the source downloaded and/or the compiler doesn't know where to look for includes (php.h and such).
+If you have any problems, it's possible you don't have the source downloaded and/or the compiler doesn't know where to look for includes (`php.h` and such).
 
 #### Windows
 
