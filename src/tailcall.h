@@ -9,8 +9,6 @@
 
 /* Some variables/types/etc. */
 
-FILE *dbg;
-
 typedef uint32_t tco_t_remap;
 
 typedef struct _tco_call_info {
