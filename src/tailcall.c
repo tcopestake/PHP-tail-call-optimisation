@@ -17,15 +17,77 @@
  */
 tco_context *tco_new_context(zend_op_array *op_array)
 {
+    tco_call_meta *call_meta;
+
     tco_context *context = malloc(sizeof(tco_context));
 
+    context->do_compile = false;
     context->op_array = op_array;
     context->t_remaps = NULL;
     context->start_address = 0;
+    context->total_extra_ops = 0;
+
+    // Allocate enough memory for the call meta pool & point to the tail.
+
+    call_meta = context->call_meta_tail = malloc(sizeof(tco_call_meta) * TCO_CALL_POOL_SIZE);
+
+    // We need to set some initial values for the first call meta structure.
+
+    call_meta->number = 1;
+    call_meta->previous = NULL;
+    call_meta->arg_mapping = NULL;
 
     // (Have a guess what this does.)
 
     return context;
+}
+
+/*
+ * Returns a new tco_call_meta structure within the current context.
+ *
+ * If a structure is free within the pool, it will be used.
+ * Otherwise, a new one will be dynamically allocated on-the-fly.
+ */
+tco_call_meta *tco_get_new_call_meta(tco_context *context)
+{
+    tco_call_meta *current_meta;
+    tco_call_meta *new_meta;
+
+    current_meta = context->call_meta_tail;
+
+    // If current_meta->number is 1, current_meta is still free to be used.
+
+    if (current_meta->number == 1) {
+        new_meta = current_meta;
+    } else {
+        // Here we can either use the next free structure or allocate a new one.
+
+        if (current_meta->number < TCO_CALL_POOL_SIZE) {
+           new_meta = context->call_meta_tail + current_meta->number;
+        } else {
+            // (Maybe allocating a new pool would be better?)
+
+            new_meta = malloc(sizeof(tco_call_meta));
+        }
+
+        // Set the number of this new structure.
+
+        new_meta->number = current_meta->number + 1;
+
+        // Map various pointers.
+
+        new_meta->previous = current_meta;
+
+        context->call_meta_tail = new_meta;
+    }
+
+    // This array will be used to map arguments to their respective T vars.
+
+    new_meta->arg_mapping = calloc(context->op_array->num_args, sizeof(uint32_t));
+
+    // Return t'structure.
+
+    return new_meta;
 }
 
 /*
@@ -34,6 +96,38 @@ tco_context *tco_new_context(zend_op_array *op_array)
  */
 void tco_free_context(tco_context *context)
 {
+    // Free any additional memory allocated for call meta outside of the pool.
+
+    tco_call_meta *next_meta;
+    tco_call_meta *call_meta;
+
+    next_meta = context->call_meta_tail;
+
+    while (next_meta) {
+        call_meta = next_meta;
+
+        // Free any memory allocated for additional opcodes.
+
+        if (call_meta->arg_mapping) {
+            free(call_meta->arg_mapping);
+        }
+
+        // Save pointer to the next (technically previous) structure.
+
+        next_meta = call_meta->previous;
+
+        // If this structure was dynamically allocated, free it.
+
+        if (call_meta->number > TCO_CALL_POOL_SIZE) {
+            free(call_meta);
+        }
+    }
+
+    // Free the memory allocated for the pool itself.
+    // (By now, call_meta should be pointing to it.)
+
+    free(call_meta);
+
     // Free any memory allocated for T var remaps.
 
     if (context->t_remaps) {
@@ -71,6 +165,153 @@ inline void tco_make_jmp(zend_op *op, uint32_t address)
 	SET_UNUSED(op->op1);
 	SET_UNUSED(op->op2);
 	SET_UNUSED(op->result);
+}
+
+/*
+ * Updates the given context with rewritten opcodes.
+ */
+void tco_compile_opcodes(tco_context *context)
+{
+    zend_op *op;
+    zend_op *opcodes;
+    zend_op *end_address;
+
+    zend_op_array *op_array = context->op_array;
+
+    tco_call_meta *call_meta = context->call_meta_tail;
+
+    uint32_t appendix_offset = op_array->last;
+
+    /*
+     * If we require additional opcodes, we'll have to allocate enough new
+     * memory for the old opcodes & the new; copy the old opcodes; free
+     * the old memory; update the pointer in the op array; and update
+     * op_array->last to account for the new opcodes.
+     */
+
+    if (context->total_extra_ops > 0) {
+        opcodes = emalloc(
+            sizeof(zend_op) * (op_array->last + context->total_extra_ops)
+        );
+
+        memcpy(
+            opcodes,
+            op_array->opcodes,
+            sizeof(zend_op) * op_array->last
+        );
+
+    	efree(op_array->opcodes);
+
+        op_array->opcodes = opcodes;
+
+        op_array->last += context->total_extra_ops;
+    } else {
+        opcodes = op_array->opcodes;
+    }
+
+    /*
+     * Now we'll need to update the opcodes for each recursive tail call.
+     *
+     * Here we'll iterate over every argument for the function.
+     * If the arg is mapped to a T var, we'll create an assignment of that
+     * T var, to that argument's variable.
+     * Otherwise, we'll create an assignment of that argument's default value.
+     *
+     * e.g. If an opcode was trying to pass T4 as the first argument - and
+     * the first argument is referred to using the variable $a - then
+     * this will instead just assign T4 to $a.
+     *
+     * If the function has another argument referred to by the variable $b - and
+     * no opcodes passed any values as the second argument - and $b has a default
+     * value of 200 - then instead we'll create an assignment of the constant
+     * value 200, to $b.
+     *
+     * The earlier T var remapping should have ensured that each T var will
+     * still have the appropriate/original/relevant value by the time we get here.
+     *
+     * In terms of where these opcodes get written to: we know that there may be
+     * spare opcodes - so we'll use as many as we can. After that, we'll
+     * write to the newly-allocated memory. Jumps will also be inserted as
+     * appropriate to tie this all together.
+     */
+
+    call_meta = context->call_meta_tail;
+
+    while (call_meta) {
+        op = opcodes + call_meta->spare_start_index;
+        end_address = opcodes + call_meta->spare_last_index;
+
+        // Loop over each argument.
+
+        for (uint32_t arg_index = 0; arg_index < op_array->num_args; arg_index++) {
+            // We'll check the op pointer against end_address to make sure
+            // we're writing to the right place (if end_address is set).
+
+            if (
+                end_address
+                && (op >= end_address)
+            ) {
+                // Add a jump at the end address, to where the remaining opcodes will be.
+
+                tco_make_jmp(end_address, appendix_offset);
+
+                // Point now to the additional memory allocated at the end.
+
+                op = opcodes + appendix_offset;
+
+                // We can also calculate at this point how many opcodes will be
+                // added to the appendix - so we can update that for the next call.
+
+                appendix_offset += (op_array->num_args - arg_index);
+
+                // (This is a bit of a hack, but my brain is tired.)
+
+                end_address = NULL;
+            }
+
+            // Initialise the opcode to an assignment to this argument's variable.
+
+            op->opcode = ZEND_ASSIGN;
+
+            op->op1_type = IS_CV;
+            op->op1.var = TCO_ARG_RECV_OPCODE(op_array, arg_index).result.var;
+
+            SET_UNUSED(op->result);
+
+            // Set the 2nd operand to either the appropriate T var or the default constant.
+
+            if (call_meta->arg_mapping[arg_index]) {
+                op->op2_type = IS_TMP_VAR;
+                op->op2.var = call_meta->arg_mapping[arg_index];
+            } else {
+                op->op2_type = IS_CONST;
+                op->op2.constant = TCO_ARG_RECV_OPCODE(op_array, arg_index).op2.constant;
+            }
+
+            // Increment the pointer.
+
+            ++op;
+        }
+
+        // At this point, we'll add a jump where ever op is currently pointing to.
+
+        tco_make_jmp(op, context->start_address);
+
+        // (This isn't strictly necessary, but we'll nop out any remaining spares.)
+
+        if (end_address) {
+            // At this point, op will be pointing to the jump we just added - so
+            // we need to increment past it.
+
+            for (++op; op <= end_address; op++) {
+                tco_nop_out(op);
+            }
+        }
+
+        // Point call_meta to the next (technically previous) structure.
+
+        call_meta = call_meta->previous;
+    }
 }
 
 /*
@@ -161,16 +402,16 @@ bool tco_is_call_recursive(zend_op_array *op_array, zend_op *op)
 /*
  * Returns an array for tracking T var remaps.
  */
-tco_t_remap *tco_get_t_remaps(tco_context *context)
+uint32_t *tco_get_t_remaps(tco_context *context)
 {
     // Each existing T variable will potentially need its own remap.
 
-    size_t bytes_required = sizeof(tco_t_remap) * context->op_array->T;
+    size_t bytes_required = sizeof(uint32_t) * context->op_array->T;
 
     // If remaps haven't already been allocated, we need to allocate 'em.
 
     if (!context->t_remaps) {
-        context->t_remaps = (tco_t_remap *) malloc(bytes_required);
+        context->t_remaps = (uint32_t *) malloc(bytes_required);
 
         // While we're here, we should probably update T to reflect the new (expected) number.
         // (This may make more sense done elsewhere, but it's here for now at least.)
@@ -188,7 +429,7 @@ tco_t_remap *tco_get_t_remaps(tco_context *context)
 /*
  * Remaps the T variable used by a given operand - if applicable.
  */
-inline void tco_do_operand_remaps(zend_uchar type, znode_op operand, tco_t_remap *t_remaps)
+inline void tco_do_operand_remaps(zend_uchar type, znode_op operand, uint32_t *t_remaps)
 {
     if (type == IS_TMP_VAR) {
         // If the given T var has been remapped, we need to remap this operand.
@@ -222,44 +463,45 @@ uint32_t tco_find_named_arg(zend_string *arg_name, tco_context *context)
 }
 
 /*
- * This function will analyse the opcodes for a given ...
+ * This function will analyse the opcodes for a given [...]
+ *
+ * The general idea here is:
+ *
+ * - Identify which T vars need to be preserved (i.e. those passed as arguments).
+ * - Track how much additional space will eventually be needed for the modified opcodes.
+ *
+ * (Not necessarily in that order.)
  */
 void tco_optimise_recursive_call(
     tco_context *context,
-    uint32_t start_index,
-    uint32_t end_index
+    uint32_t init_index,
+    uint32_t return_index
 ) {
     zend_op *op;
-    zend_op *new_op;
 
-    uint32_t next_arg_index;
-
-    /*
-     * The general idea here is:
-     *
-     * - Identify which T vars need to be preserved (i.e. those passed as arguments).
-     * - Track how much additional space will eventually be needed for the modified opcodes.
-     * - Rewrite the opcodes to remove the init/call/return/etc.
-     * - Write the opcodes to assign values to variables used for arguments and
-     *   jump back to the beginning of the function (after the recv opcodes).
-     * - Where the recursive calls would have been, we'll instead add
-     *   a jump to the aforementioned opcodes.
-     *
-     * (Not necessarily in that order.)
-     */
+    uint32_t arg_index;
 
     zend_op_array *op_array = context->op_array;
 
-    // This array will be used to map arguments to their respective T vars.
+    // Flag the context as having been optimised, requiring compilation, etc.
 
-    uint32_t *arg_mapping = calloc(op_array->num_args, sizeof(arg_mapping));
+    context->do_compile = true;
 
-    // T variable mapping.
-    // (op_array->T itself will be updated elsewhere.)
+    // This will get/allocate a structure for storing meta data for the call.
 
-    tco_t_remap *t_remaps = tco_get_t_remaps(context);
+    tco_call_meta *call_meta = tco_get_new_call_meta(context);
+
+    // At some point we'll need to know how many arguments were passed.
+    // (This will be updated as various send opcodes are encountered.)
+
+    uint32_t args_passed_count = 0;
+
+    // T variable (re)mapping.
+
+    uint32_t *t_remaps = tco_get_t_remaps(context);
 
     // This is used to track the next available (newly-created) T var.
+    // (op_array->T itself will be updated elsewhere.)
 
     uint32_t next_free_t_var = op_array->T;
 
@@ -270,15 +512,15 @@ void tco_optimise_recursive_call(
      * (Obviously we want to start by overwriting the first opcode.)
      */
 
-    uint32_t destination_index = start_index;
+    uint32_t destination_index = init_index;
 
-    // This loop will skip the init at the first index & the call and return at the end.
+    // This loop will skip the init at the first index - and the call and return at the end.
 
-    uint32_t index_limit = end_index - 2;
+    uint32_t index_limit = return_index - 1;
 
     for (
-        uint32_t i = start_index + 1;
-        i <= index_limit;
+        uint32_t i = init_index + 1;
+        i < index_limit;
         i++
     ) {
         op = &op_array->opcodes[i];
@@ -314,25 +556,27 @@ void tco_optimise_recursive_call(
             case ZEND_SEND_VAL_EX:
             case ZEND_SEND_VAR:
             case ZEND_SEND_VAL:
+                ++args_passed_count;
+
                 // If I'm not wrong, operand 2 being a constant means it's a named argument.
                 // Otherwise, operand 2 is the argument #... I think.
 
                 if (op->op2_type == IS_CONST) {
                     // In theory, this function should never fail to find a value.
 
-                    next_arg_index = tco_find_named_arg(
+                    arg_index = tco_find_named_arg(
                         Z_STR_P(CT_CONSTANT_EX(op_array, op->op2.constant)),
                         context
                     );
                 } else {
                     // (The indices in the operand are 1-based - so we'll have to subtract 1.)
 
-                    next_arg_index = op->op2.num - 1;
+                    arg_index = op->op2.num - 1;
                 }
 
                 // Map this argument to its respective (T) variable.
 
-                arg_mapping[next_arg_index] = op->op1.var;
+                call_meta->arg_mapping[arg_index] = op->op1.var;
 
                 // Any T variable used here needs to be protected.
                 // (It needs to retain its value for the assignment later.)
@@ -359,61 +603,32 @@ void tco_optimise_recursive_call(
     }
 
     /*
-     * Here we'll iterate over every argument. If the arg is mapped to a T var, we'll
-     * create an assignment of that T var, to that argument's variable.
-     * Otherwise, we'll create an assignment of that argument's default value.
+     * By now, between destination_index and return_index there may be some
+     * spare/unused opcodes (e.g. the send/call/return opcodes we ignored, the
+     * ZEND_CHECK_UNDEF_ARGS we nopped out, etc.).
      *
-     * e.g. If an opcode was trying to pass T4 as the first argument - and
-     * the first argument is referred to using the variable $a - then
-     * this will instead just assign T4 to $a.
+     * If there's enough spare opcodes to write our modifications, we won't
+     * need to do anything else. If there's not, in a later step we'll need
+     * to allocate more memory to write some new opcodes to.
      *
-     * If the function has another argument referred to by the variable $b - and
-     * no opcodes passed any values as the second argument - and $b has a default
-     * value of 200 - then instead we'll create an assignment of the constant
-     * value 200, to $b.
+     * So here we'll essentially calculate how much new memory may be needed.
      *
-     * The earlier T var remapping should have ensured that each T var will
-     * still have the appropriate/original/relevant value by the time we get here.
+     * We need 1 opcode per argument (for assignments) and 1 for the jump back
+     * to the beginning. If we don't have enough spare opcodes to reuse, we'll
+     * need an additional jump (to where ever the remaining assignments are).
      */
 
-    for (uint32_t arg_index = 0; arg_index < op_array->num_args; arg_index++) {
-        // Get the next available opcode (and increment destination_index).
+    uint32_t required_opcodes = op_array->num_args + 1;
+    uint32_t spare_opcodes = (return_index - destination_index) + 1;
 
-        new_op = &op_array->opcodes[destination_index++];
-
-        // Initialise the opcode to an assignment to this argument's variable.
-
-        new_op->opcode = ZEND_ASSIGN;
-
-        new_op->op1_type = IS_CV;
-        new_op->op1.var = TCO_ARG_RECV_OPCODE(op_array, arg_index).result.var;
-
-        SET_UNUSED(new_op->result);
-
-        // Set the 2nd operand to either the appropriate T var or the default constant.
-
-        if (arg_mapping[arg_index]) {
-            new_op->op2_type = IS_TMP_VAR;
-            new_op->op2.var = arg_mapping[arg_index];
-        } else {
-            new_op->op2_type = IS_CONST;
-            new_op->op2.constant = TCO_ARG_RECV_OPCODE(op_array, arg_index).op2.constant;
-        }
+    if (spare_opcodes < required_opcodes) {
+        context->total_extra_ops += (required_opcodes - spare_opcodes) + 1;
     }
 
-    // The next opcode needs to be a jump back to the beginning of the function.
+    // Either way, we'll set the indices to where the spare opcodes begin & end.
 
-    tco_make_jmp(&op_array->opcodes[destination_index++], context->start_address);
-
-    // This isn't strictly necessary, but we'll nop out any remaining unused opcodes.
-
-    for (; destination_index <= end_index; destination_index++) {
-        tco_nop_out(&op_array->opcodes[destination_index]);
-    }
-
-    // Free any allocated memory, etc.
-
-    free(arg_mapping);
+    call_meta->spare_start_index = destination_index;
+    call_meta->spare_last_index = return_index;
 }
 
 /*
@@ -421,14 +636,14 @@ void tco_optimise_recursive_call(
  */
 void tco_analyse(tco_context *context)
 {
+    uint32_t i;
+
     zend_op *op;
     uint32_t return_index;
 
     zend_op_array *op_array = context->op_array;
 
     uint32_t search_state = TCO_STATE_SEEKING_RETURN;
-
-    uint32_t i;
 
     // I think all op arrays are guaranteed to have at least one opcode, but just in case...
 
@@ -450,7 +665,7 @@ void tco_analyse(tco_context *context)
 
     for (
         i = 0;
-        i < op_array->last && !found_start_address;
+        (i < op_array->last) && !found_start_address;
         i++
     ) {
         switch (op_array->opcodes[i].opcode) {
@@ -471,9 +686,7 @@ void tco_analyse(tco_context *context)
         }
     }
 
-    /*
-     * Now we need to go over the rest of the opcodes, but backwards.
-     */
+    // Now we need to go over the rest of the opcodes, but backwards.
 
     for (i = op_array->last; i > 0; i--) {
         op = &op_array->opcodes[i];
@@ -558,6 +771,12 @@ static void tco_op_handler(zend_op_array *op_array)
 
     tco_analyse(context);
 
+    // If recursive calls were found & optimised, we need to finalise everything.
+
+    if (context->do_compile) {
+        tco_compile_opcodes(context);
+    }
+
     // (We're finished here.)
 
     tco_free_context(context);
@@ -581,7 +800,7 @@ ZEND_EXT_API zend_extension zend_extension_entry = {
     NULL,
     NULL,
     NULL,
-    NULL, // tco_startup,
+    tco_startup, // tco_startup,
     NULL,
     NULL,
     tco_op_handler,

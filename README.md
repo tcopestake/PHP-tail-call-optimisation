@@ -27,9 +27,9 @@ function test($n = 0) {
 }
 ```
 
-With this module disabled - on my machine - the total running time benchmarks at around 0.006 - 0.0155 seconds - and total memory usage peaks at around 11.37 - 14.52 megabytes. Increasing the loop count from 100,000 to 10,000,000 results in a memory allocation error - hitting approx. 134.21 megabytes.
+With this module disabled - on my machine - the total running time benchmarks at around 0.006 to 0.0155 seconds - and total memory usage peaks at around 11.37 to 14.52 megabytes. Increasing the loop count from 100,000 to 10,000,000 results in a memory allocation error - hitting approx. 134.21 megabytes.
 
-With the module enabled, the total running time benchmarks around 0.0009 - 0.002 seconds (anywhere from 3x to 17x faster) - and memory usage is fairly constant at around 0.43 megabytes. Increasing the loop count to 10,000,000 completes in ~0.16 seconds - with memory usage still constant at around 0.43 megabytes.
+With the module enabled, the total running time benchmarks around 0.0009 to 0.002 seconds (anywhere from 3x to 17x faster) - and memory usage is constant at around 0.43 megabytes. Increasing the loop count to 10,000,000 completes in ~0.16 seconds - with memory usage still constant at around 0.43 megabytes.
 
 (Read on if you're curious to learn what's happening in the background.)
 
