@@ -7,8 +7,6 @@ Disclaimer: I can't guarantee the completeness or stability of this extension - 
 ## Table of contents
 * [Example](#example)
 * [Installation](#install)
-* [Configuration](#config)
-* [Under the hood](#internals)
 * [Caveats](#caveats)
 * [License](#license)
 
@@ -29,7 +27,7 @@ function test($n = 0) {
 
 With this module disabled - on my machine - the total running time benchmarks at around 0.006 to 0.0155 seconds - and total memory usage peaks at around 11.37 to 14.52 megabytes. Increasing the loop count from 100,000 to 10,000,000 results in a memory allocation error - hitting approx. 134.21 megabytes.
 
-With the module enabled, the total running time benchmarks around 0.0009 to 0.002 seconds (anywhere from 3x to 17x faster) - and memory usage is constant at around 0.43 megabytes. Increasing the loop count to 10,000,000 completes in ~0.16 seconds - with memory usage still constant at around 0.43 megabytes.
+With the module enabled, the total running time benchmarks around 0.001 to 0.002 seconds (anywhere from 3x to 16x faster) - and memory usage is constant at around 0.43 megabytes. Increasing the loop count to 10,000,000 completes in ~0.16 seconds - with memory usage still constant at around 0.43 megabytes.
 
 (Read on if you're curious to learn what's happening in the background.)
 
@@ -67,18 +65,19 @@ With the module enabled, these opcodes are rewritten to something closer to this
 
 Here, all function call opcodes are removed/rewritten. Instead of `T2` being pushed as an argument, it's assigned directly to `$n` - and instead of `test` being called again, there's a `JMP` to `0001` - back to the beginning of the function.
 
-(The `NOP` on `0006` and `0007` are just overwritten leftover opcodes; they could/should get optimised out in a later pass by something like OPcache.)
+(The `NOP` on `0006` and `0007` are just leftover opcodes; they could/should get optimised out in a later pass by something like OPcache.)
 
 Here is a slightly more complex example:
 
 ```
 class Test
 {
-    public function test($x = 10, $n = 0) {
+    public function test($i = 0, $j = 0, $n = 0, $x = 1, $y = 2, $z = 3)
+    {
         // (Do something important with $x here.)
 
         if ($n < 100000) {
-            $x = 9000;
+            $x = 9001;
 
             // Now $x has been changed.
 
@@ -93,29 +92,37 @@ class Test
 With the module enabled, the resulting opcodes for the `test` method (after optimisation) are as such:
 
 ```
-0000 CV0($x) = RECV_INIT 1 int(10)
-0001 CV1($n) = RECV_INIT 2 int(0)
-0002 T2 = IS_SMALLER CV1($n) int(100000)
-0003 JMPZ T2 0011
-0004 ASSIGN CV0($x) int(9000)
-0005 T4 = ADD CV1($n) int(1)
-0006 ASSIGN CV0($x) int(10)
-0007 ASSIGN CV1($n) T4
-0008 JMP 0002
-0009 NOP
-0010 NOP
-0011 INIT_FCALL 1 112 string("test")
-0012 SEND_VAR CV1($n) 1
-0013 V6 = DO_UCALL
-0014 RETURN V6
-0015 RETURN null
+0000 CV0($i) = RECV_INIT 1 int(0)
+0001 CV1($j) = RECV_INIT 2 int(0)
+0002 CV2($n) = RECV_INIT 3 int(0)
+0003 CV3($x) = RECV_INIT 4 int(1)
+0004 CV4($y) = RECV_INIT 5 int(2)
+0005 CV5($z) = RECV_INIT 6 int(3)
+0006 T6 = IS_SMALLER CV2($n) int(100000)
+0007 JMPZ T6 0015
+0008 ASSIGN CV3($x) int(9001)
+0009 T8 = ADD CV2($n) int(1)
+0010 ASSIGN CV0($i) int(0)
+0011 ASSIGN CV1($j) int(0)
+0012 ASSIGN CV2($n) T8
+0013 ASSIGN CV3($x) int(1)
+0014 JMP 0020
+0015 INIT_FCALL 1 112 string("test")
+0016 SEND_VAR CV2($n) 1
+0017 V10 = DO_UCALL
+0018 RETURN V10
+0019 RETURN null
+0020 ASSIGN CV4($y) int(2)
+0021 ASSIGN CV5($z) int(3)
+0022 JMP 0006
 ```
 
 This example demonstrates a number of things:
 
 1. The module works with named arguments.
-2. At `0006` we can see that `$x` is reset to its default value of `10`.
-3. Between `0011` and `0014`, the call to another `test` function in a different scope, is correctly identified as not being recursive.
+2. At `0013` we can see that `$x` gets reset to its default value of `1` before the next iteration.
+3. The call between `0015` and `0018` is correctly identified as being a different function in a different scope (despite having the same name).
+4. Additional opcodes have been allocated at `0020` to `0022` - for the assignment opcodes which didn't fit in the space originally available. (You'll notice that the jump at `0014` jumps here instead of jumping straight to `0006`.)
 
 <a name="install"></a>
 ## Installation
@@ -129,8 +136,6 @@ Once you have compiled either a `.so` or `.dll`, you can add the module to your 
 ```
 zend_extension=<path to your .dll or .so>
 ```
-
-(I'd recommend adding it before OPcache.)
 
 There's any number of guides around the internet on how to build PHP and/or extensions from source, but something like this should get you started:
 
@@ -157,16 +162,6 @@ nmake php_tailcall.dll
 ```
 
 If you run into trouble, you likely don't have environment variables set (e.g. by `vcvarsall.bat` or `phpsdk_setvars.bat`) - or you haven't configured things right (e.g. with `buildconf.bat`) - or PHP doesn't know where to find the module source.
-
-<a name="config"></a>
-## Configuration
-
-[todo]
-
-<a name="internals"></a>
-## Under the hood
-
-[todo]
 
 <a name="caveats"></a>
 ## Caveats
