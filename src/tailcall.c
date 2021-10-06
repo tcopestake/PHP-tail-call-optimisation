@@ -1,9 +1,3 @@
-/***
- *
- * For the rundown on how this all works, check ../README.md
- *
- **/
-
 #include <stddef.h>
 #include <stdbool.h>
 #include "php.h"
@@ -55,9 +49,9 @@ tco_call_meta *tco_get_new_call_meta(tco_context *context)
 
     current_meta = context->call_meta_tail;
 
-    // If current_meta->number is 1, current_meta is still free to be used.
+    // If current_meta->arg_mapping is NULL, current_meta is still free to be used.
 
-    if (current_meta->number == 1) {
+    if (current_meta->arg_mapping == NULL) {
         new_meta = current_meta;
     } else {
         // Here we can either use the next free structure or allocate a new one.
