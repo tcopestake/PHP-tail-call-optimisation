@@ -1,6 +1,6 @@
 ## Intro
 
-This is a Zend extension to add recursive tail call optimisation to PHP. Developed and tested with PHP 8, but should compile & work with other versions.
+This is a Zend extension to add recursive tail call optimisation to PHP. Developed and tested with PHP 8, but should compile & work with other versions. Plays nice with OPcache (as far as I can tell).
 
 Disclaimer: I can't guarantee the completeness or stability of this extension - so if you choose to use it in the wild, exercise discretion.
 
